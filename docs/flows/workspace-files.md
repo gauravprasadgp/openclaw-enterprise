@@ -1,7 +1,7 @@
 ---
 created: 2026-08-31
-updated: 2026-09-30
-last_updated_session: authoring-run/e062d2c6-e51f-42eb-8046-fd6ec6d6b3c4
+updated: 2026-10-01
+last_updated_session: authoring-run/944b9f5c-dd07-45f4-8179-ed96b2ba3e79
 ---
 
 # Agent Workspace Files Flow
@@ -226,9 +226,11 @@ Other Harnesses are replaced, restarting their Gateway.
 - Default reads cover the enrolled Agent's Harness workspace and managed skill
   roots. Symlinks are not followed; explicit policies remain authoritative. This
   serves previews, browsing, bootstrap and outputs.
-- Writes remain restricted to owner documents, memory, skills, and staged inbound
-  files. `file.create` preserves existing files. Reads above 16 MiB retain caller
-  and node limits; command admission does not replace path authorization.
+- `runtime-entrypoints.ts:configureWorkspaceNodePlugins` defaults writes to
+  owner documents, memory, `skills/**`, the two ClawHub lockfiles,
+  `.openclaw/skill-installs/**`, and staged inbound files. It leaves explicit
+  node and wildcard policies unchanged. `file.create` preserves existing files.
+  Reads above 16 MiB retain caller and node limits; command admission does not replace path authorization.
 
 The chart supplies worker credentials/public trust and Compute installs node
 access to Envoy. Memory uses node duplex with existing native file workers;
@@ -338,6 +340,8 @@ replays it. The native client closes in the operation's cleanup path.
 [keep this for the user to add notes. do not change between edits]
 
 ## Changelog
+
+- 2026-10-01 11:27: Authorize dedicated Skill source trees and lifecycle metadata in the default node policy. (authoring-run/944b9f5c-dd07-45f4-8179-ed96b2ba3e79 - 836a88e048dc79dfb42066fd0cf868e7405a2f98)
 
 - 2026-09-30 16:29: Require RWO for new and reused Harness claims, including final deletion. (authoring-run/e062d2c6-e51f-42eb-8046-fd6ec6d6b3c4 - 4baeb8f6d21ff0d73102e0800c4e6cc0ed6a6366)
 
