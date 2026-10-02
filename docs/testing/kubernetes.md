@@ -264,6 +264,17 @@ prerequisites fail; an unselected suite skips. Default Codex version expectation
 is `0.158.0`; see [runtime settings](#kubernetes-real-runtime-test-environment)
 for version assertions and alternate image variables.
 
+### Namespaced Codex models
+
+The pinned Gateway Codex adapter currently treats the first component of a
+slash-containing native model ID as an app-server provider. For example,
+`codex/qwen/qwen3.8-flash` reaches `thread/start` with provider `qwen`, which is
+not the configured compatible provider. The dedicated Agent can deploy, activate,
+and pass its native startup turn while a Gateway turn fails with
+`Model provider qwen not found`. Fixing the adapter's provider routing is required
+before claiming end-to-end OpenRouter Qwen support. A standalone Codex response
+or a successful startup probe does not establish that Gateway path.
+
 ### Transcript persistence
 
 Both Harness topologies require a gateway image that stores transcripts in
@@ -348,6 +359,7 @@ Codex custom tools.
 | `OCC_TEST_DATABASE_URL`                     | Migrated disposable loopback database named `openclaw_k8s_*`; the ordinary development database fails.                                                                                                     |
 | `OPENAI_API_KEY`                            | Existing authorized provider credential for real embedded and dedicated model turns.                                                                                                                       |
 | `OCC_TEST_OPENAI_MODEL`                     | Authorized provider model; defaults to `gpt-6-astra`.                                                                                                                                                      |
+| `OCC_TEST_CODEX_OPENAI_BASE_URL`            | Optional HTTPS Responses endpoint for dedicated Codex API-key tests; applied through `runtime.codexOpenaiBaseUrl`. Keep the native Codex provider at its fail-closed loopback URL.                         |
 
 The separate [`harness-topology-k3d-routing-real.test.mjs`](../../tests/integration/harness-topology-k3d-routing-real.test.mjs) requires
 `OCC_TEST_GATEWAY_ROUTING_REAL=1` and the same runtime prerequisites. It also
