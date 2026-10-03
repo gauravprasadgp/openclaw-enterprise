@@ -30,14 +30,14 @@ Each behavior-changing step updates its owning reference, guide, source-backed f
 
 ## Verification
 
-| Required outcome | Real check and prerequisites | Result or remaining proof |
-| --- | --- | --- |
-| Omitted and explicit mandatory settings compose; weaker modes fail at Installation startup; the request uses `hard_requirement` | Existing Sandbox Driver startup and provisioning integration tests | Authored; Node 24.19.0 is available, but the test cannot load because the installed `pg` dependency is missing |
-| A real child cannot start without filesystem policy | Disposable Kubernetes OpenShell integration with a pinned compatible runtime | Not run; runtime qualification pending |
-| Each applicable network layer permits traffic within the admitted policy | Real Kubernetes and provider network probes for both conflicting-layer cases | Not implemented; both conflicts must deny traffic |
-| Exact Agent policy scope, authorization, and immutable snapshot | Regular API and worker Agent deployment integration with PostgreSQL | Not implemented |
-| Enforcement before activation and fail-closed replacement | Real API → worker → Compute → selected Driver integration | Not implemented |
-| Production workload identity and credentials survive provider provisioning | Pinned OpenShell Kubernetes runtime with a real model turn | Blocked by current stock gateway projection limits |
+| Required outcome                                                                                                                | Real check and prerequisites                                                 | Result or remaining proof                                                                                                                                    |
+| ------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Omitted and explicit mandatory settings compose; weaker modes fail at Installation startup; the request uses `hard_requirement` | Existing Sandbox Driver startup and provisioning integration tests           | 19/19 startup cases passed locally on PR #919 head `599776430` with Node 24.19.0; the injected Gateway verifies request construction, not kernel enforcement |
+| A real child cannot start without filesystem policy                                                                             | Disposable Kubernetes OpenShell integration with a pinned compatible runtime | Not run; runtime qualification pending                                                                                                                       |
+| Each applicable network layer permits traffic within the admitted policy                                                        | Real Kubernetes and provider network probes for both conflicting-layer cases | Not implemented; both conflicts must deny traffic                                                                                                            |
+| Exact Agent policy scope, authorization, and immutable snapshot                                                                 | Regular API and worker Agent deployment integration with PostgreSQL          | Not implemented                                                                                                                                              |
+| Enforcement before activation and fail-closed replacement                                                                       | Real API → worker → Compute → selected Driver integration                    | Not implemented                                                                                                                                              |
+| Production workload identity and credentials survive provider provisioning                                                      | Pinned OpenShell Kubernetes runtime with a real model turn                   | Blocked by current stock gateway projection limits                                                                                                           |
 
 ## Open decisions
 
@@ -47,13 +47,15 @@ OCE maintainers must settle the smallest provider-neutral policy vocabulary and 
 
 The OpenShell hardening slice changes [the bundled adapter](../../apps/controller/src/drivers/sandbox/openshell.ts), [its integration test](../../tests/integration/sandbox-driver-startup.test.mjs), [the current reference](../../docs/reference/drivers/openshell-sandbox.md), and [the flow](../../docs/flows/openshell-sandbox-provisioning.md). Runtime qualification remains pending. The `SandboxPolicy` resource, immutable revision snapshot, and enforcement evidence are not implemented.
 
-[PR #919](https://github.com/openclaw/openclaw-enterprise/pull/919) carries the independent Driver hardening. A collaborator reports 19/19 startup tests passing on their merged tree; this checkout's run remains blocked by missing dependencies. [Pinned provider diagnostics](https://gist.github.com/gauravprasadgp/3a3206219f7fad1153590385e999cfab) show runtime qualification refusing startup on the local Docker VM because Landlock syscalls return `ENOSYS`. They do not prove successful filesystem enforcement, the changed OCE request path, or refusal before an Agent-owned child executes. Full runtime proof and maintainer acceptance remain outstanding. Docker is running and the pinned images are available; a compatible kernel, k3d, and disposable cluster fixtures remain required.
+[PR #919](https://github.com/openclaw/openclaw-enterprise/pull/919) carries the independent Driver hardening. After explicitly preparing frozen-lockfile dependencies, all 19 startup integration cases passed locally on #919 head `599776430`; workspace, lint, type, formatting, and documentation checks also passed. This establishes Installation composition, rejection of weaker settings, and Driver request construction, not live kernel enforcement. [Pinned provider diagnostics](https://gist.github.com/gauravprasadgp/3a3206219f7fad1153590385e999cfab) show runtime qualification refusing startup on the local Docker VM because Landlock syscalls return `ENOSYS`. They do not prove successful filesystem enforcement, the changed OCE request path, or refusal before an Agent-owned child executes. Full runtime proof and maintainer acceptance remain outstanding. Docker is running and the pinned images are available; a compatible kernel, k3d, and disposable cluster fixtures remain required.
 
 ## Manual Notes
 
 [keep this for the user to add notes. do not change between edits]
 
 ## Changelog
+
+- 2026-10-03: Recorded local startup and repository validation after explicitly approved dependency setup; mandatory runtime proof and owning-team decisions remain open (source `599776430`).
 
 - 2026-10-03: Separated the proposal from PR #919, allocated RFC-0057 after inspecting open RFCs through RFC-0056, and corrected network permission across enforcement layers with both conflicting-layer proof cases (source `1d36d4390`).
 

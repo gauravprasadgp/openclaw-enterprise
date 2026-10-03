@@ -32,12 +32,12 @@ The first implementation must explicitly prove its pre-execution ordering. The c
 
 ## Ownership and trust boundaries
 
-| Owner | Responsibility |
-| --- | --- |
-| OCC | Policy resource, IAM, immutable revision snapshot, admission and activation decisions, audit. |
-| Compute Driver | Namespace baseline, Agent identity, gateway, candidate workload, route and lifecycle ordering. |
-| Sandbox Driver | Translate, apply, and prove the exact admitted containment requirements; clean up its own resources. |
-| Kubernetes runtime | Optional host isolation, such as an approved RuntimeClass; it does not replace Agent policy or IAM. |
+| Owner              | Responsibility                                                                                       |
+| ------------------ | ---------------------------------------------------------------------------------------------------- |
+| OCC                | Policy resource, IAM, immutable revision snapshot, admission and activation decisions, audit.        |
+| Compute Driver     | Namespace baseline, Agent identity, gateway, candidate workload, route and lifecycle ordering.       |
+| Sandbox Driver     | Translate, apply, and prove the exact admitted containment requirements; clean up its own resources. |
+| Kubernetes runtime | Optional host isolation, such as an approved RuntimeClass; it does not replace Agent policy or IAM.  |
 
 Secret values and provider credentials are not policy data or revision data. Credential Gateway attachments remain separately authorized and must be ready before activation. Network permission does not grant a credential, and credential binding does not grant network permission. Within Kubernetes, the NetworkPolicies selecting a Pod combine additively for each traffic direction. Traffic crossing Kubernetes and the provider boundary must be allowed by each applicable enforcement layer and remain within the admitted Agent policy. A Kubernetes allow cannot override a provider deny, and a provider allow cannot override a Kubernetes deny.
 
