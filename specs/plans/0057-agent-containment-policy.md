@@ -5,10 +5,10 @@ rfc: ../rfcs/0057-agent-containment-policy.md
 # Implementation plan: Agent containment policy
 
 - **ID:** RFC-0057
-- **Delivery status:** Planned; no containment milestone has merged
+- **Delivery status:** Planned; #919 foundation hardening merged, containment milestones unimplemented
 - **Owner:** OCC resource and IAM maintainers, with Sandbox and Kubernetes Compute maintainers
 - **Authority:** [RFC-0057](../rfcs/0057-agent-containment-policy.md) and the [platform design](../../docs/design.md)
-- **Source baseline:** `main` at `55da37a9d`
+- **Source baseline:** `main` at `8193ad3ca`, including merged #919
 
 ## Outcome and scope
 
@@ -22,10 +22,10 @@ OCC owns policy/ceiling authorization, canonical immutable snapshots and receipt
 
 ## Implementation
 
-1. **Independent hardening:** [PR #919](https://github.com/openclaw/openclaw-enterprise/pull/919) proposes mandatory Landlock compatibility and rejection of weaker settings. Its checks and provider diagnostics belong to that PR. It remains unmerged and cannot qualify containment alone.
-2. **Installation policy evidence:** Freeze the operator's ceiling, normalized policy and translation version into canonical AgentRevision contents without adding a Namespace resource. Extend Driver admission/translation/observation/suspension and worker/Compute integration. Prove authenticated control-plane evidence independent of Agent-writable signals, exact effective digest comparison and policy-before-child ordering. Reject sandbox-originated policy sync and draft approvals. Qualify direct sockets and all traffic classes, accounting for additive Kubernetes/operator policies. Keep unsupported upstream combinations unavailable.
-3. **Continuous enforcement:** Require matching receipts per instance/generation. Gate provider restarts/reloads; on drift or observation loss, stop execution and withdraw routes. Recheck authorization and ceiling before recovery. Reject revisions without canonical snapshots; no legacy fallback. Prove Pod restart, supervisor sync, operator mutation, expiry, route withdrawal and termination through the real worker lifecycle.
-4. **Namespace resource:** Add the policy resource, exact IAM/audit/API operations, PostgreSQL constraints, same-Namespace Agent reference and frozen policy generation. Reject policies above the Installation ceiling and redeployments without references. Reject deletion while drafts or live/retiring revisions reference a policy; permit it after detach and completed retirement. Verify ceiling changes, immutable active snapshots and unsupported snapshot refusal through API → PostgreSQL → worker → Compute → real Driver.
+1. **Merged foundation:** [PR #919](https://github.com/openclaw/openclaw-enterprise/pull/919) merged as `f34d220290c3246d9d61c6ee4ff73696ac836161` on 2026-10-03. Mandatory Landlock configuration and rejection of weaker settings are implemented; its validation belongs to that PR. This prerequisite does not qualify the evidence or Namespace policy milestones.
+2. **Installation policy evidence:** Freeze the operator's ceiling, normalized policy and translation version into canonical AgentRevision contents without adding a Namespace resource. Use a canonical loaded-configuration digest as ceiling identity; verify restart and API/worker configuration mismatch behavior. Extend Driver admission/translation/observation/suspension and worker/Compute integration. Prove authenticated control-plane evidence independent of Agent-writable signals, exact effective digest comparison and policy-before-child ordering. Reject sandbox-originated policy sync and draft approvals. Qualify direct sockets and all traffic classes, accounting for additive Kubernetes/operator policies. Keep unsupported upstream combinations unavailable.
+3. **Continuous enforcement:** Require matching receipts per instance/generation. Gate provider restarts/reloads; on drift or observation loss, stop execution and withdraw routes. Recheck authorization and ceiling before recovery. Reject revisions without canonical snapshots; no legacy fallback. Before release, require an API/Console-visible "redeploy required" diagnostic and a release note explaining that existing sandboxed revisions stop until redeployed. This is planned product behavior; no upgrade or migration procedure is added here. Prove Pod restart, supervisor sync, operator mutation, expiry, route withdrawal and termination through the real worker lifecycle.
+4. **Namespace resource:** Add the policy resource, exact IAM/audit/API operations, PostgreSQL constraints, same-Namespace Agent reference and frozen policy generation. Reject policies above the Installation ceiling and redeployments without references. Reject deletion while drafts or live/retiring revisions reference a policy; permit it after detach and completed retirement. Verify ceiling tightening suspends all first-milestone sandboxed revisions, loosening preserves their old snapshots, immutable active snapshots and unsupported snapshot refusal through API → PostgreSQL → worker → Compute → real Driver.
 5. **Additional qualification:** Qualify dedicated Codex transport separately before expanding the caller. Host isolation such as gVisor/Kata, other source types, OAuth, repository credentials or other execution modes need separate reviewed milestones, not silent admission expansion.
 
 Each runtime milestone updates its reference, guide, flow and integration coverage. The API cheat sheet is generated from its schema. Model credentials stay only in their authorized runtime/provider boundary. No simulated provider substitutes for required execution proof.
@@ -34,16 +34,19 @@ Each runtime milestone updates its reference, guide, flow and integration covera
 
 All capability rows below are planned, not executed. #919 owns its separate startup-check results.
 
-| Required outcome                                        | Real workflow proof                                                                                                                                                                      |
-| ------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Allowed/denied actions and policy-before-child ordering | Pinned compatible provider with a real dedicated native OpenClaw turn; refusal before an Agent-owned child marker on unavailable enforcement.                                            |
-| Trusted receipts and exact effective policy             | Reject Agent-written annotations/files/logs, sandbox-authenticated reports, unexpected baseline additions and mismatched translated digests.                                             |
-| No workload-originated policy widening                  | Real sandbox-authenticated sync, draft submission/approval and operator mutations cannot authorize an unadmitted policy.                                                                 |
-| Each traffic class stays within the snapshot            | Allowed/denied proxy requests, direct sockets, Pod peers and ingress; both conflicting Kubernetes/provider layer cases must deny.                                                        |
-| Drift cannot retain execution or routing                | Restart/re-sync, changed policy version/generation and lost observation/expired receipt gate execution and withdraw routes; matching evidence and authorization are required to recover. |
-| Exact scope, ceiling, authorization and snapshot        | Real API/worker integration with PostgreSQL proves cross-Namespace refusal, ceiling rejection/tightening and immutable active revisions.                                                 |
-| Resource deletion and unsupported snapshots             | Reject deletion with draft/live/retiring references; allow after cleanup. Refuse activation/resume of revisions without canonical snapshots; redeploy requires admitted inputs.          |
-| Identity, credentials and cleanup survive provisioning  | Pinned OpenShell Kubernetes workflow verifies projections, ready attachments, model turn and exact `harnessResource` revocation. Current stock projections block qualification.          |
+| Required outcome                                        | Real workflow proof                                                                                                                                                                             |
+| ------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Allowed/denied actions and policy-before-child ordering | Pinned compatible provider with a real dedicated native OpenClaw turn; refusal before an Agent-owned child marker on unavailable enforcement.                                                   |
+| Trusted receipts and exact effective policy             | Reject Agent-written annotations/files/logs, sandbox-authenticated reports, unexpected baseline additions and mismatched translated digests.                                                    |
+| No workload-originated policy widening                  | Real sandbox-authenticated sync, draft submission/approval and operator mutations cannot authorize an unadmitted policy.                                                                        |
+| Each traffic class stays within the snapshot            | Allowed/denied proxy requests, direct sockets, Pod peers and ingress; both conflicting Kubernetes/provider layer cases must deny.                                                               |
+| Drift cannot retain execution or routing                | Restart/re-sync, changed policy version/generation and lost observation/expired receipt gate execution and withdraw routes; matching evidence and authorization are required to recover.        |
+| Static ceiling identity and restart                     | Canonical configuration digests match across API/worker; tightening suspends prior first-milestone revisions, loosening preserves them until redeploy, and mixed configuration cannot activate. |
+| Network-policy visibility                               | Enforcing CNI and operator-reviewed cluster/plugin controls are part of real qualification; Compute claims only the selecting namespaced policies it can read.                                  |
+| Redeployment diagnostic                                 | API and Console show "redeploy required" for unsupported snapshots; release notes disclose the intentional stop before the milestone ships.                                                     |
+| Exact scope, ceiling, authorization and snapshot        | Real API/worker integration with PostgreSQL proves cross-Namespace refusal, ceiling rejection/tightening and immutable active revisions.                                                        |
+| Resource deletion and unsupported snapshots             | Reject deletion with draft/live/retiring references; allow after cleanup. Refuse activation/resume of revisions without canonical snapshots; redeploy requires admitted inputs.                 |
+| Identity, credentials and cleanup survive provisioning  | Pinned OpenShell Kubernetes workflow verifies projections, ready attachments, model turn and exact `harnessResource` revocation. Current stock projections block qualification.                 |
 
 ## Open decisions
 
@@ -51,13 +54,15 @@ Decision owners and binding invariants are listed in [RFC-0057](../rfcs/0057-age
 
 ## Delivery record
 
-Nothing in this plan has shipped. [PR #919](https://github.com/openclaw/openclaw-enterprise/pull/919) proposes changes to the adapter, startup tests, reference and flow. Its head-bound validation and diagnostics remain in that PR. The Namespace resource, canonical containment snapshot and enforcement evidence are unimplemented. A compatible Landlock kernel, disposable Kubernetes fixtures, qualified upstream projections and authorized model credentials remain prerequisites for real-runtime proof.
+The foundation hardening in [PR #919](https://github.com/openclaw/openclaw-enterprise/pull/919) has merged; its adapter, startup-test, reference and flow changes are present on main. The Installation evidence and Namespace policy milestones in this plan have not shipped. Its head-bound validation and diagnostics remain in that PR. The Namespace resource, canonical containment snapshot and enforcement evidence are unimplemented. A compatible Landlock kernel, disposable Kubernetes fixtures, qualified upstream projections and authorized model credentials remain prerequisites for real-runtime proof.
 
 ## Manual Notes
 
 [keep this for the user to add notes. do not change between edits]
 
 ## Changelog
+
+- 2026-10-03: Recorded merged #919 and clarified configuration-derived ceiling identity, tightening/loosening, redeployment diagnostics, release-note requirements and CNI observation limits after follow-up review (source `111aaf024`).
 
 - 2026-10-03: Created RFC-0057 and its primary plan in PR #1003, separated from #919. Revised after architectural feedback to stage Installation evidence before Namespace policy; specify ceiling, trusted receipts, drift, traffic classes, deletion and qualification scope. Earlier hardening history belongs to [PR #919](https://github.com/openclaw/openclaw-enterprise/pull/919).
 
