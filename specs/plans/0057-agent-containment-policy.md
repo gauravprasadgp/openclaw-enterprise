@@ -5,55 +5,65 @@ rfc: ../rfcs/0057-agent-containment-policy.md
 # Implementation plan: Agent containment policy
 
 - **ID:** RFC-0057
-- **Delivery status:** In progress; first OpenShell hardening slice authored, runtime proof pending
-- **Owner:** OpenClaw Enterprise maintainers
+- **Delivery status:** Planned; no containment milestone has merged
+- **Owner:** OCC resource and IAM maintainers, with Sandbox and Kubernetes Compute maintainers
 - **Authority:** [RFC-0057](../rfcs/0057-agent-containment-policy.md) and the [platform design](../../docs/design.md)
 - **Source baseline:** `main` at `55da37a9d`
 
 ## Outcome and scope
 
-An authorized deployment of a dedicated Kubernetes Agent on an Installation requiring containment admits an exact Namespace-owned `SandboxPolicy`, freezes it in the AgentRevision, and activates only after the selected Sandbox Driver proves enforcement before the Harness executes. Embedded and SSH execution remain outside the first supported scope. The RFC owns the proposed contract and open design choices.
+First prove enforcement of the existing Installation policy through the regular Agent deployment workflow. Then add narrower Namespace-owned policies beneath the operator's ceiling. Selecting a Sandbox Driver implies required containment; no extra enable switch is proposed. RFC-0057 owns the exact trust, drift, lifecycle and traffic-class requirements.
+
+The first qualification target is dedicated native OpenClaw on Kubernetes with the paired OpenShell Backend and an OpenAI static CredentialSource. Dedicated Codex with CredentialSource auth requires separate protected transport qualification. OAuth, repository credentials, embedded/SSH execution and other source types remain unavailable in this milestone. No qualifying production path exists today.
 
 ## Contract and source touchpoints
 
-The Agent deployment path owns policy reference authorization, admission, and immutable revision contents. The worker rechecks authorization and selected Driver identity. The `SandboxDriver` owns provider-specific translation and evidence; the Kubernetes Compute Driver owns workload identity, baseline isolation, and lifecycle ordering. Start from the current [Sandbox Driver contract](../../docs/reference/drivers/sandbox.md), [Agent lifecycle](../../docs/reference/agents.md), and [OpenShell flow](../../docs/flows/openshell-sandbox-provisioning.md).
+OCC owns policy/ceiling authorization, canonical immutable snapshots and receipt comparison. The worker rechecks authorization, owner and selected Driver. Sandbox owns translation, trusted observation and execution gates; Compute owns identity, generation, routing and lifecycle. Extend the [Sandbox contract](../../docs/reference/drivers/sandbox.md), [Agent deployment](../../docs/reference/agents.md) and [OpenShell flow](../../docs/flows/openshell-sandbox-provisioning.md) through their real callers.
 
 ## Implementation
 
-1. **OpenShell hardening slice:** Require `hard_requirement` Landlock compatibility in the bundled Driver, reject weaker or unknown Installation settings at startup, and check the serialized `CreateSandbox` request through the existing integration path. This is authored separately in [PR #919](https://github.com/openclaw/openclaw-enterprise/pull/919), which can be reviewed independently of this RFC. It does not claim a new platform policy or qualified production deployment.
-2. Add the Namespace policy resource, exact IAM and audit operations, API schema, PostgreSQL constraints, Agent reference, and immutable AgentRevision snapshot. Extend the regular Agent deployment integration test for exact authorization, scope, snapshot immutability, and refusal without a capable selected Driver.
-3. Extend the provider-neutral `SandboxDriver` contract with admission and enforcement evidence. Wire the API, work queue, worker, Compute, and Driver through the real Agent workflow. Keep provider-specific translation in the Driver. Prove rejection, pending enforcement, activation, replacement, and cleanup; a test-only Driver is insufficient for a production containment claim.
-4. Qualify a pinned OpenShell release for projected identity, Secret references, workspace mounts, authenticated transport, and pre-execution policy ordering. Extend the disposable Kubernetes OpenShell integration with a real model turn and allowed and denied child actions. Prove both conflicting network cases: Kubernetes allows while the provider denies, and the provider allows while Kubernetes denies. Traffic must fail in both cases and must never exceed the admitted policy. Unsupported upstream combinations remain unavailable.
-5. If host isolation is selected, qualify gVisor or Kata RuntimeClass separately through the Compute-owned Kubernetes path, including scheduling, storage, networking, and denial behavior.
+1. **Independent hardening:** [PR #919](https://github.com/openclaw/openclaw-enterprise/pull/919) proposes mandatory Landlock compatibility and rejection of weaker settings. Its checks and provider diagnostics belong to that PR. It remains unmerged and cannot qualify containment alone.
+2. **Installation policy evidence:** Freeze the operator's ceiling, normalized policy and translation version into canonical AgentRevision contents without adding a Namespace resource. Extend Driver admission/translation/observation/suspension and worker/Compute integration. Prove authenticated control-plane evidence independent of Agent-writable signals, exact effective digest comparison and policy-before-child ordering. Reject sandbox-originated policy sync and draft approvals. Qualify direct sockets and all traffic classes, accounting for additive Kubernetes/operator policies. Keep unsupported upstream combinations unavailable.
+3. **Continuous enforcement:** Require matching receipts per instance/generation. Gate provider restarts/reloads; on drift or observation loss, stop execution and withdraw routes. Recheck authorization and ceiling before recovery. Reject revisions without canonical snapshots; no legacy fallback. Prove Pod restart, supervisor sync, operator mutation, expiry, route withdrawal and termination through the real worker lifecycle.
+4. **Namespace resource:** Add the policy resource, exact IAM/audit/API operations, PostgreSQL constraints, same-Namespace Agent reference and frozen policy generation. Reject policies above the Installation ceiling and redeployments without references. Reject deletion while drafts or live/retiring revisions reference a policy; permit it after detach and completed retirement. Verify ceiling changes, immutable active snapshots and unsupported snapshot refusal through API → PostgreSQL → worker → Compute → real Driver.
+5. **Additional qualification:** Qualify dedicated Codex transport separately before expanding the caller. Host isolation such as gVisor/Kata, other source types, OAuth, repository credentials or other execution modes need separate reviewed milestones, not silent admission expansion.
 
-Each behavior-changing step updates its owning reference, guide, source-backed flow, and integration coverage. The API cheat sheet is generated from the owning API contract.
+Each runtime milestone updates its reference, guide, flow and integration coverage. The API cheat sheet is generated from its schema. Model credentials stay only in their authorized runtime/provider boundary. No simulated provider substitutes for required execution proof.
 
 ## Verification
 
-| Required outcome                                                                                                                | Real check and prerequisites                                                 | Result or remaining proof                                                                                                                                    |
-| ------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Omitted and explicit mandatory settings compose; weaker modes fail at Installation startup; the request uses `hard_requirement` | Existing Sandbox Driver startup and provisioning integration tests           | 19/19 startup cases passed locally on PR #919 head `599776430` with Node 24.19.0; the injected Gateway verifies request construction, not kernel enforcement |
-| A real child cannot start without filesystem policy                                                                             | Disposable Kubernetes OpenShell integration with a pinned compatible runtime | Not run; runtime qualification pending                                                                                                                       |
-| Each applicable network layer permits traffic within the admitted policy                                                        | Real Kubernetes and provider network probes for both conflicting-layer cases | Not implemented; both conflicts must deny traffic                                                                                                            |
-| Exact Agent policy scope, authorization, and immutable snapshot                                                                 | Regular API and worker Agent deployment integration with PostgreSQL          | Not implemented                                                                                                                                              |
-| Enforcement before activation and fail-closed replacement                                                                       | Real API → worker → Compute → selected Driver integration                    | Not implemented                                                                                                                                              |
-| Production workload identity and credentials survive provider provisioning                                                      | Pinned OpenShell Kubernetes runtime with a real model turn                   | Blocked by current stock gateway projection limits                                                                                                           |
+All capability rows below are planned, not executed. #919 owns its separate startup-check results.
+
+| Required outcome                                        | Real workflow proof                                                                                                                                                                      |
+| ------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Allowed/denied actions and policy-before-child ordering | Pinned compatible provider with a real dedicated native OpenClaw turn; refusal before an Agent-owned child marker on unavailable enforcement.                                            |
+| Trusted receipts and exact effective policy             | Reject Agent-written annotations/files/logs, sandbox-authenticated reports, unexpected baseline additions and mismatched translated digests.                                             |
+| No workload-originated policy widening                  | Real sandbox-authenticated sync, draft submission/approval and operator mutations cannot authorize an unadmitted policy.                                                                 |
+| Each traffic class stays within the snapshot            | Allowed/denied proxy requests, direct sockets, Pod peers and ingress; both conflicting Kubernetes/provider layer cases must deny.                                                        |
+| Drift cannot retain execution or routing                | Restart/re-sync, changed policy version/generation and lost observation/expired receipt gate execution and withdraw routes; matching evidence and authorization are required to recover. |
+| Exact scope, ceiling, authorization and snapshot        | Real API/worker integration with PostgreSQL proves cross-Namespace refusal, ceiling rejection/tightening and immutable active revisions.                                                 |
+| Resource deletion and unsupported snapshots             | Reject deletion with draft/live/retiring references; allow after cleanup. Refuse activation/resume of revisions without canonical snapshots; redeploy requires admitted inputs.          |
+| Identity, credentials and cleanup survive provisioning  | Pinned OpenShell Kubernetes workflow verifies projections, ready attachments, model turn and exact `harnessResource` revocation. Current stock projections block qualification.          |
 
 ## Open decisions
 
-OCE maintainers must settle the smallest provider-neutral policy vocabulary and evidence for pre-execution enforcement before steps 2 and 3 can ship. The first supported scope is dedicated Kubernetes execution; expanding required containment to embedded or SSH Agents needs separately qualified paths.
+Decision owners and binding invariants are listed in [RFC-0057](../rfcs/0057-agent-containment-policy.md#open-decisions). Resource/IAM maintainers own vocabulary/ceiling administration; Sandbox maintainers own trusted proof; Compute maintainers own generation/expiry/suspension; Harness and Credential Gateway maintainers own supported combinations. Acceptance of a document does not complete any delivery milestone.
 
 ## Delivery record
 
-The OpenShell hardening slice changes [the bundled adapter](../../apps/controller/src/drivers/sandbox/openshell.ts), [its integration test](../../tests/integration/sandbox-driver-startup.test.mjs), [the current reference](../../docs/reference/drivers/openshell-sandbox.md), and [the flow](../../docs/flows/openshell-sandbox-provisioning.md). Runtime qualification remains pending. The `SandboxPolicy` resource, immutable revision snapshot, and enforcement evidence are not implemented.
-
-[PR #919](https://github.com/openclaw/openclaw-enterprise/pull/919) carries the independent Driver hardening. After explicitly preparing frozen-lockfile dependencies, all 19 startup integration cases passed locally on #919 head `599776430`; workspace, lint, type, formatting, and documentation checks also passed. This establishes Installation composition, rejection of weaker settings, and Driver request construction, not live kernel enforcement. [Pinned provider diagnostics](https://gist.github.com/gauravprasadgp/3a3206219f7fad1153590385e999cfab) show runtime qualification refusing startup on the local Docker VM because Landlock syscalls return `ENOSYS`. They do not prove successful filesystem enforcement, the changed OCE request path, or refusal before an Agent-owned child executes. Full runtime proof and maintainer acceptance remain outstanding. Docker is running and the pinned images are available; a compatible kernel, k3d, and disposable cluster fixtures remain required.
+Nothing in this plan has shipped. [PR #919](https://github.com/openclaw/openclaw-enterprise/pull/919) proposes changes to the adapter, startup tests, reference and flow. Its head-bound validation and diagnostics remain in that PR. The Namespace resource, canonical containment snapshot and enforcement evidence are unimplemented. A compatible Landlock kernel, disposable Kubernetes fixtures, qualified upstream projections and authorized model credentials remain prerequisites for real-runtime proof.
 
 ## Manual Notes
 
 [keep this for the user to add notes. do not change between edits]
 
 ## Changelog
+
+- 2026-10-03: Created RFC-0057 and its primary plan in PR #1003, separated from #919. Revised after architectural feedback to stage Installation evidence before Namespace policy; specify ceiling, trusted receipts, drift, traffic classes, deletion and qualification scope. Earlier hardening history belongs to [PR #919](https://github.com/openclaw/openclaw-enterprise/pull/919).
+
+## Earlier draft record
+
+These preserved notes record the predecessor draft and branch validation. They do not establish completion of this Planned delivery or change the RFC's Proposed decision.
 
 - 2026-10-03: Recorded local startup and repository validation after explicitly approved dependency setup; mandatory runtime proof and owning-team decisions remain open (source `599776430`).
 

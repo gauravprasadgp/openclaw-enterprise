@@ -5,53 +5,103 @@ status: Proposed
 # Proposal: Agent containment policy
 
 - **ID:** RFC-0057
-- **Owner:** OpenClaw Enterprise maintainers
+- **Owner:** OCC resource and IAM maintainers, with Sandbox and Kubernetes Compute maintainers
+- **Created:** 2026-10-03
+- **Last updated:** 2026-10-03
+- **RFC PR:** [PR #1003](https://github.com/openclaw/openclaw-enterprise/pull/1003)
 - **Current references:** [Agents](../../docs/reference/agents.md), [Sandbox Driver](../../docs/reference/drivers/sandbox.md), and [runtime security](../../docs/reference/security/runtime-isolation.md)
 - **Architecture:** [Resources](../../docs/design/resources.md), [Drivers](../../docs/design/drivers.md), and [safeguards](../../docs/design/safeguards.md)
 - **Delivery:** [Implementation plan](../plans/0057-agent-containment-policy.md)
+- **Related:** [OpenShell hardening #919](https://github.com/openclaw/openclaw-enterprise/pull/919), [0.x egress decision](40-agent-egress-0x/index.md), and [Sandbox credential injection](39-sandbox-credential-injection.md)
 
 ## Problem and decision
 
-An operator needs to require containment before an Agent can execute untrusted work. Today, selecting a Sandbox Driver records its ID in the AgentRevision and delegates dedicated Harness provisioning, but the revision contains no exact platform policy. A Driver's declared `networking`, `filesystem`, or `process` facet does not prove that it applied the restrictions required for this Agent. The bundled OpenShell integration also cannot complete a supported production deployment against its pinned stock gateway version.
+An operator needs assurance that containment applies before an Agent executes and continues to apply after replacement or policy changes. Today, selecting a Sandbox Driver applies Installation-configured policy to dedicated Harnesses. The AgentRevision records its Driver ID, but no exact platform policy or trustworthy enforcement receipt. Facet declarations and Pod readiness cannot establish that boundary. The stock pinned OpenShell gateway also lacks workload projections needed for a supported production deployment.
 
-Make `SandboxPolicy` a Namespace-owned resource and an immutable AgentRevision input. OpenClaw Control Plane (OCC) authorizes the exact policy reference, validates that the Installation-selected Sandbox Driver can enforce it, and admits its complete normalized contents into the revision. The worker must reject a changed or unavailable Driver and must not activate the revision until enforcement of that exact snapshot is confirmed. The Driver owns implementation-specific policy translation and evidence; Compute retains Agent identity, gateway, routing, baseline isolation, and cleanup order.
+First qualify trustworthy enforcement of the existing Installation policy through the regular Agent workflow. Then introduce the already-designed Namespace-owned `SandboxPolicy` for narrower Agent policies. For example, an operator may permit source-control access for one Agent and an external tool API for another without granting both destinations to every Agent. The second milestone delivers that distinction; it is not a prerequisite for proving the existing Installation policy.
 
-This is a platform capability. OpenShell is one possible Driver, not the policy model or its sole caller. The first supported caller is an authorized deployment of a dedicated Kubernetes Agent on an Installation that requires containment. The Installation refuses a deployment without an enforceable policy; it never silently uses a weaker runtime. Requiring containment for embedded and SSH Agents remains later work until those modes have a qualifying implementation.
+OpenClaw Control Plane (OCC) owns admission, immutable revision snapshots, IAM and activation. The Sandbox Driver translates and enforces policy; Compute retains identity, gateway, routing, baseline isolation and cleanup. No milestone may silently fall back to an unsandboxed Harness.
 
 ## Scope and contract
 
-The first policy version specifies the required network, filesystem, and process outcomes for one Harness. It must express denial by default, permitted outbound destinations and peers, readable and writable paths, user and privilege requirements, and any allowed process capabilities. OCE owns a small, versioned, provider-neutral vocabulary. A Driver may support only a subset, but admission must reject any requirement it cannot enforce. Driver-specific configuration stays in the Driver's trusted Installation settings; it cannot broaden an Agent policy.
+Selecting a Sandbox Driver implies required containment for deployments using that Installation. This proposal adds no separate `requires containment` switch. The first qualification target is dedicated native OpenClaw on bundled Kubernetes Compute with the paired OpenShell Backend and an `openai` static CredentialSource (`credential_source` authentication). This remains a target, not supported production behavior. Session workers share the Agent's boundary; this proposal does not isolate mutually untrusted sessions within one Agent.
 
-The policy is created and updated under its Namespace with exact IAM operations and audit records. An Agent draft references a policy in the same Namespace. Deployment authorizes both `deploy` on that Agent and `read` on the referenced policy, then freezes the policy ID, generation, normalized contents, selected Driver ID, and enforcement contract version in the AgentRevision. Editing a policy affects only a later deployment. An Agent cannot choose its own Driver or use a policy from another Namespace.
+Dedicated Codex with CredentialSource authentication needs a separate qualification of protected app-server transport. Codex OAuth and repository credential bindings remain unavailable with a selected Sandbox Driver. Embedded and SSH execution, direct model-secret delivery, other source types, and additional providers require separate qualification. Declared facets do not expand these combinations.
 
-The `SandboxDriver` contract needs operations to check a proposed policy before admission and to establish and report enforcement for the exact revision. Those operations consume platform types and exact owner identities. They must not grant IAM permissions, rewrite a revision, select another target, or claim success from a facet declaration alone. Existing optional Harness provisioning remains a separate lifecycle operation until the owning Compute contract is revised. A policy change must not be silently applied to an active revision.
+### Installation ceiling and Agent policy
 
-The worker rechecks the original actor's authorization and the revision's owner and Driver selection before effects. Compute prepares the nonserving candidate and calls the Driver through its existing lifecycle. The Driver must apply the frozen policy before untrusted code can execute and return evidence bound to the exact AgentRevision and workload generation. The worker checks that evidence before activation. A pending observation defers; a denial or unsupported policy fails the revision. An unavailable provider cannot cause fallback to an unsandboxed Harness. Stop, retirement, and Namespace deletion keep their current exact-owner cleanup order and retry rules.
+The Installation operator owns the maximum allowed network, filesystem and process policy in trusted Driver configuration. The first milestone freezes that policy and its translation contract into the AgentRevision, with no Namespace policy reference. There is one canonical snapshot format; no legacy fallback qualifies containment.
 
-The first implementation must explicitly prove its pre-execution ordering. The current OpenShell `provisionHarness` call submits policy with `CreateSandbox`, but OCE's later Pod readiness check alone does not prove the child could not run before policy enforcement. The current adapter defaults Landlock compatibility to `best_effort` and accepts an arbitrary compatibility string. [PR #919](https://github.com/openclaw/openclaw-enterprise/pull/919) separately proposes `hard_requirement` and rejection of weaker or unknown values. The pinned provider already applies a mandatory Landlock capability baseline; the Driver change adds a mandatory policy requirement, whose effect still needs real runtime verification. If the provider cannot supply pre-execution evidence or preserve OCE workload identity, the production path remains unavailable.
+The second milestone adds a versioned, provider-neutral Namespace `SandboxPolicy`. Its vocabulary expresses default denial, outbound destinations and peers, readable/writable paths, user/privilege requirements and permitted capabilities. Admission rejects unknown requirements, unsupported Driver features, and policies broader than the Installation ceiling. It does not silently intersect an overbroad request with that ceiling. The Driver enforces exactly the admitted policy, including explicitly permitted runtime baseline additions. Provider settings cannot widen it.
+
+Only the Installation operator may change the ceiling. Namespace administrators may manage Agent policies within it; this milestone does not delegate ceiling changes. Reading and attaching a more permissive Namespace policy therefore cannot exceed the operator's maximum. Policy create/update/delete and Agent deploy/read operations require exact IAM authorization and attributable audit records. Deployment requires `deploy` on the Agent and `read` on a same-Namespace policy. A missing policy reference in the second milestone is rejected.
+
+The revision freezes the policy ID/generation when applicable, normalized contents and digest, ceiling generation/digest, selected Driver ID, and translation contract version. Later policy edits affect later deployments only. A ceiling change never rewrites a revision: OCC checks whether the frozen policy still fits the current maximum during admission and reconciliation. A newly incompatible active revision must lose routing and stop executing until explicitly redeployed under an admitted policy.
+
+### Evidence and execution
+
+The Sandbox Driver contract needs admission, translation, enforcement observation and suspension operations. They consume platform types and exact owner identities; they cannot grant IAM permissions, rewrite revisions or select another target. Existing provisioning and cleanup remain lifecycle operations. Enforcement before execution and evidence before activation are separate requirements.
+
+Evidence must come through an authenticated provider control-plane interface whose trust boundary excludes the Agent workload. Workload annotations, logs, files and sandbox-authenticated RPCs cannot independently establish enforcement. A control plane merely relaying those claims is insufficient. The provider must establish that the exact instance loaded the policy before child execution and gate every restart on that condition; OCC cannot infer ordering from readiness or a timestamp.
+
+OCC compares the provider's effective policy version and canonical digest with the expected digest of the Driver's translation of the frozen snapshot. Evidence binds the exact AgentRevision, workload instance/generation, selected Driver, translation version and policy version/digest. Baseline additions must be described by the vocabulary and included in the expected translation. Unexplained changes, including widening, fail qualification. Sandbox-originated policy changes, policy sync writes and draft approvals must be disabled or refused for contained Agents; trusted operator changes are subject to the same digest check.
+
+At OCE's [pinned OpenShell revision](https://github.com/NVIDIA/OpenShell/blob/dde8a9a57f34f9d998618b3d35821608165c980f/proto/openshell.proto), `ReportPolicyStatus`, `ReportSandboxConfiguration` and `SubmitPolicyAnalysis` use sandbox authentication. Its [UpdateConfig validation](https://github.com/NVIDIA/OpenShell/blob/dde8a9a57f34f9d998618b3d35821608165c980f/crates/openshell-server/src/grpc/policy.rs) permits sandbox-scoped policy sync. Those signals alone do not satisfy this contract. Qualification must prove a trusted observation and mutation boundary; until then, the production path remains unavailable.
+
+### Activation and drift
+
+The worker rechecks actor authorization, ownership, ceiling and selected Driver before effects. Compute prepares a nonserving candidate; the Driver must enforce the snapshot before untrusted execution. OCC activates only on matching evidence and ready credential attachments. Pending evidence defers; unsupported policy or denial fails the candidate.
+
+Each workload generation requires new matching evidence. A Pod restart, supervisor re-sync, different effective policy version, operator mutation or unobservable enforcement invalidates the prior receipt. OCC withdraws routing and the Driver must suspend or terminate execution; route withdrawal alone does not stop tools or existing connections. The provider must prevent execution during a generation change or policy reload before OCC observes it. Observation failure cannot extend an old receipt indefinitely. Recovery requires matching evidence for the current instance and policy, renewed authorization checks and normal activation. The provider's execution gate, bounded observation interval and lease expiry require qualification together.
+
+### Resource lifecycle
+
+Policy updates do not change active revision snapshots. Deletion is rejected while an Agent draft or a live/retiring revision references that policy; detach drafts and finish stop/retirement first. Historical retired snapshots remain self-contained and do not block deletion. Use database constraints for persisted reference invariants and exact-owner cleanup.
+
+Revisions lacking the canonical policy snapshot/evidence are unsupported under required containment. They cannot activate or resume; reconciliation withdraws routing and stops execution rather than continuing under an inferred Installation policy. Redeployment in the first milestone freezes the Installation policy; in the second, it requires a policy reference. No dual persisted format or silent default is introduced. Stop, retirement and Namespace deletion preserve existing exact-owner cleanup and retries, including credential revocation through `harnessResource`.
 
 ## Ownership and trust boundaries
 
-| Owner              | Responsibility                                                                                       |
-| ------------------ | ---------------------------------------------------------------------------------------------------- |
-| OCC                | Policy resource, IAM, immutable revision snapshot, admission and activation decisions, audit.        |
-| Compute Driver     | Namespace baseline, Agent identity, gateway, candidate workload, route and lifecycle ordering.       |
-| Sandbox Driver     | Translate, apply, and prove the exact admitted containment requirements; clean up its own resources. |
-| Kubernetes runtime | Optional host isolation, such as an approved RuntimeClass; it does not replace Agent policy or IAM.  |
+| Owner                   | Responsibility                                                                                                   |
+| ----------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| OCC                     | Policy/ceiling admission, IAM, immutable revision contents, evidence comparison, audit and activation.           |
+| Compute Driver          | Identity, gateway, workload generation, baseline networking, routing and lifecycle ordering.                     |
+| Sandbox Driver/provider | Exact translation, trusted enforcement evidence, pre-execution gates, drift observation, suspension and cleanup. |
+| Kubernetes runtime      | Baseline isolation and separately qualified host containment; neither replaces Agent policy or IAM.              |
 
-Secret values and provider credentials are not policy data or revision data. Credential Gateway attachments remain separately authorized and must be ready before activation. Network permission does not grant a credential, and credential binding does not grant network permission. Within Kubernetes, the NetworkPolicies selecting a Pod combine additively for each traffic direction. Traffic crossing Kubernetes and the provider boundary must be allowed by each applicable enforcement layer and remain within the admitted Agent policy. A Kubernetes allow cannot override a provider deny, and a provider allow cannot override a Kubernetes deny.
+Network permission grants neither credentials nor OCC authority. Credential Gateway attachments remain separately authorized and must be ready before activation.
+
+Kubernetes NetworkPolicies combine additively within Kubernetes for each direction. Traffic crossing multiple boundaries must satisfy every applicable layer and stay within the admitted policy. Qualification must identify the exact enforcement point for each traffic class:
+
+| Traffic class                                          | Exact policy enforcement required                                                                                               | Other boundaries                                                                          |
+| ------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
+| Proxied external/model egress                          | Selected provider proxy enforces admitted destination and protocol rules.                                                       | Kubernetes baseline is defense in depth; credential binding grants no network permission. |
+| Direct sockets, including attempts to bypass the proxy | Provider network isolation must deny bypass or enforce the same admitted rules before packets leave the Harness.                | Broader additive Kubernetes allowances cannot establish exact Agent confinement.          |
+| Harness Pod-to-Pod traffic                             | Compute compiles admitted peer rules into Kubernetes policy and verifies the union of all selecting policies cannot widen them. | Provider rules may further restrict; operator policy cannot override the ceiling.         |
+| Ingress                                                | Compute enforces admitted peer/port rules through Kubernetes policy; exposed provider routes must also enforce them.            | Gateway authentication supplies identity, not a substitute for peer restrictions.         |
+
+Qualification fails if any traffic class lacks its exact enforcement point. Current Compute TCP/443 exceptions and operator `gateway.networkPolicyResources` must be accounted for in that union. The provider cannot compensate for arbitrary direct-socket bypass merely by filtering proxied requests. The [0.x egress decision](40-agent-egress-0x/index.md) remains the authority for choosing OpenShell's proxy.
 
 ## Delivery and verification
 
-The [implementation plan](../plans/0057-agent-containment-policy.md) records the ordered work and proof. The separate OpenShell hardening PR proposes mandatory Landlock compatibility; it does not deliver the policy resource or production support. Production support requires installed-runtime evidence; passing unit tests or a simulated provider does not establish it.
+The [plan](../plans/0057-agent-containment-policy.md) separates evidence for Installation policy from the Namespace resource. Require real Agent workflow proof for trusted receipts, permitted/denied filesystem and network actions, pre-child refusal, credential placement, mutation rejection, restarts and observation loss. Test both Kubernetes-allow/provider-deny and provider-allow/Kubernetes-deny. Simulated providers and declared facets do not qualify production.
+
+[PR #919](https://github.com/openclaw/openclaw-enterprise/pull/919) separately proposes mandatory Landlock policy compatibility and rejection of weaker Installation settings. The pinned provider already requires a mandatory capability baseline; generic unavailable-kernel refusal does not demonstrate that flag's effect. Neither PR delivers production containment today.
+
+## Rationale and alternatives
+
+- **Retain Installation-only policy without evidence:** Smallest change, but leaves pre-execution ordering and drift unproved. Mandatory flags alone do not resolve that gap.
+- **Qualify Installation policy and stop there:** Provides the essential assurance with fewer resource/IAM changes. This is the first delivery milestone and may ship independently. It cannot express different narrower policies for Agents sharing an Installation.
+- **Introduce per-Agent policy and evidence together:** Delivers least privilege sooner, but ties provider qualification to a larger resource change. Prefer sequential milestones so the essential proof is independently reviewable.
+- **Rely on Kubernetes policy or declared facets:** Neither establishes filesystem/process enforcement or exact proxied egress. Host isolation such as gVisor may complement the selected Driver but requires separate qualification.
 
 ## Open decisions
 
-- **Later rollout:** Decide whether and when to require containment for embedded Kubernetes and SSH Agents after each has a qualified implementation. The first milestone covers dedicated Kubernetes execution only.
-- **Policy vocabulary:** Agree on the smallest normalized network, filesystem, and process fields that can be enforced by at least one supported provider without making the platform core parse provider configuration. Version the contract and reject unknown requirements.
-- **Enforcement proof:** Define the evidence that binds an applied policy to the exact revision and workload generation, and how a controller recovers after an uncertain provider response. Pod readiness and declared facets are insufficient.
-- **OpenShell qualification:** Pin an upstream release only after confirming its Kubernetes contract. Current upstream documentation describes capabilities that the OCE `v0.1.3-pre.1` adapter does not consume; compatibility must be tested rather than inferred.
+- **OCC resource and IAM maintainers:** Approve the minimal normalized vocabulary and ceiling administration. Unknown requirements and widening remain denied.
+- **Sandbox integration maintainers:** Select a provider control-plane evidence mechanism with trusted execution ordering, mutation restrictions and bounded enforcement observation. Sandbox self-reports remain insufficient.
+- **Kubernetes Compute maintainers:** Define the instance/generation mapping, observation expiry and suspension/route recovery integration. Changed or unobservable enforcement remains nonserving and nonexecuting.
+- **Harness and Credential Gateway maintainers:** Qualify dedicated native OpenClaw/static OpenAI first; decide when separate Codex transport, source types and other topologies meet the same invariants.
 
 ## Current implementation boundary
 
-The first hardening slice does not add `SandboxPolicy` or change the supported deployment combinations. The current Sandbox Driver contract has optional `configureAgent`, `ensureNamespace`, and `provisionHarness` hooks plus required cleanup. It exposes broad containment facets, not an Agent policy resource or exact enforcement evidence. Dedicated OpenClaw requires all three facets and provisioning, while ordinary embedded execution cannot use the selected Sandbox Driver. The bundled OpenShell production path is blocked by its pinned gateway's missing workload projections. See the linked current references for operational limits.
+`SandboxPolicy`, ceiling snapshots and trusted enforcement evidence are unimplemented. Today's Sandbox contract has optional `configureAgent`, `ensureNamespace`, `provisionHarness`, `harnessResource` and `readSandboxLogs` hooks plus required cleanup. `harnessResource` supplies exact Sandbox identity for credential revocation; logs are diagnostic, never enforcement evidence. Dedicated native OpenClaw requires provisioning and all three facets; selected Sandboxes reject embedded execution. Current OpenShell projection and networking limits remain in the linked references.
