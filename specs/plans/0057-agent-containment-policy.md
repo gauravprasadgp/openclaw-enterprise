@@ -1,20 +1,20 @@
 ---
-rfc: ../rfcs/0057-agent-containment-policy.md
+rfc: ../rfcs/0019-agent-containment-policy.md
 ---
 
 # Implementation plan: Agent containment policy
 
-- **ID:** RFC-0057
+- **ID:** RFC-0019
 - **Delivery status:** Planned; #919 foundation hardening merged, containment milestones unimplemented
 - **Owner:** OCC resource and IAM maintainers, with Sandbox and Kubernetes Compute maintainers
-- **Authority:** [RFC-0057](../rfcs/0057-agent-containment-policy.md) and the [platform design](../../docs/design.md)
-- **Source baseline:** Initial plan: `main` at `8193ad3ca`, including merged #919. Implementation planning follow-up: `main` at `cb6783fae`.
+- **Authority:** [RFC-0019](../rfcs/0019-agent-containment-policy.md) and the [platform design](../../docs/design.md)
+- **Source baseline:** Initial plan: `main` at `8193ad3ca`, including merged #919. Implementation planning follow-up: `main` at `cb6783fae`; current qualification refresh: `main` at `bb7d2a110` (2026-10-07).
 
 ## Outcome and scope
 
-First prove enforcement of the existing Installation policy through the regular Agent deployment workflow. Then add narrower Namespace-owned policies beneath the operator's ceiling. Selecting a Sandbox Driver implies required containment; no extra enable switch is proposed. RFC-0057 owns the exact trust, drift, lifecycle and traffic-class requirements.
+First prove enforcement of the existing Installation policy through the regular Agent deployment workflow. Then add narrower Namespace-owned policies beneath the operator's ceiling. Selecting a Sandbox Driver implies required containment; no extra enable switch is proposed. RFC-0019 owns the exact trust, drift, lifecycle and traffic-class requirements.
 
-The first qualification target is dedicated native OpenClaw on Kubernetes with the paired OpenShell Backend and an OpenAI static CredentialSource. Dedicated Codex with CredentialSource auth requires separate protected transport qualification. OAuth, repository credentials, embedded/SSH execution and other source types remain unavailable in this milestone. No qualifying production path exists today.
+The first qualification target is dedicated native OpenClaw on Kubernetes with the paired OpenShell Backend and an OpenAI static CredentialSource. Dedicated Codex with CredentialSource auth now has an experimental provider-file and bearer-passthrough path; production transport and containment qualification remain separate. OAuth, repository credentials, embedded/SSH execution and other source types remain unavailable in this milestone. No qualifying production path exists today.
 
 Gateway sharding, capacity scheduling, `OpenShellSandboxClass`, multi-cluster placement and fleet rollout changes are deferred. This work keeps the existing deployment-paired OpenShell gateway. Namespace policy delivery follows qualification of Installation enforcement; it is not part of the first implementation slice.
 
@@ -42,7 +42,7 @@ Keep provider RPCs and translated policy details inside the OpenShell integratio
 ### Step 1: Qualify the provider mechanism
 
 - [ ] Sandbox maintainers qualify the existing isolated OpenShell supervisor and configuration admission at the current provider pin. Prove credential isolation, effective policy identity, baseline additions, generation binding and policy-before-child ordering. Use gateway interceptor bindings to reject widening and workload-authored proposals while permitting exact admitted supervisor synchronization.
-- [ ] Harness and Credential Gateway maintainers resolve the stock provider's projected identity and protected transport gaps through supported upstream interfaces. Keep verification-only projection bridges outside the supported implementation.
+- [ ] Harness and Credential Gateway maintainers qualify the requested identity and credential boundary. Codex already uses runtime provider files, an app-server verifier and bearer passthrough; the local profile disables projected identity and rejects explicit requests it cannot preserve. Its workspace-node setup envelope is development-only. Native OpenClaw still requires a supported path without its verification bridge.
 - [ ] Compute maintainers define instance/generation mapping, observation lifetime, suspension acknowledgement and recovery. Enforcement must expire or stop at the provider even when OCC cannot reach it; removing a route alone does not stop outbound Agent work.
 - [ ] Prepare a disposable enforcing Kubernetes cluster, compatible Landlock kernel, migrated PostgreSQL database with a limited application role, immutable runtime images and existing authorized model credentials. Follow [OpenShell testing](../../docs/testing/openshell.md), [Kubernetes testing](../../docs/testing/kubernetes.md) and [PostgreSQL setup](../../docs/testing/postgresql.md).
 
@@ -50,7 +50,7 @@ Keep provider RPCs and translated policy details inside the OpenShell integratio
 
 ### Provider inspection and adapter work
 
-The 2026-10-04 review selected existing OpenShell mechanisms for qualification, correcting the earlier assumption that sandbox-scoped authentication necessarily identifies an untrusted reporter. The [v0.1.2 architecture](https://github.com/NVIDIA/OpenShell/blob/v0.1.2/architecture/sandbox.md) separates supervisor credentials from the Agent; OCE's later pin already includes the [governance interceptor](https://github.com/NVIDIA/OpenShell/blob/dde8a9a57f34f9d998618b3d35821608165c980f/examples/governance-interceptor/README.md). No version upgrade is selected by this plan.
+The 2026-10-04 review selected existing mechanisms for qualification. The 2026-10-07 refresh checks OCE's current OpenShell `v0.1.3-pre.2` pin (`021400be8af471f8669369e679de3e18cf0bd672`); sandbox-scoped authentication alone does not identify an untrusted reporter. The [v0.1.2 architecture](https://github.com/NVIDIA/OpenShell/blob/v0.1.2/architecture/sandbox.md) separates supervisor credentials from the Agent; the current pin includes the [governance interceptor](https://github.com/NVIDIA/OpenShell/blob/021400be8af471f8669369e679de3e18cf0bd672/examples/governance-interceptor/README.md). This refresh records existing main behavior, not a provider upgrade.
 
 | Producer                                     | Adapter consumer and required comparison                                                                                                                                                                    |
 | -------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -60,7 +60,7 @@ The 2026-10-04 review selected existing OpenShell mechanisms for qualification, 
 | Governed mutation interceptors               | Sandbox/Backend integration validates exact frozen policy and baseline composition across create, synchronization, proposal approval, global policy and provider-profile changes.                           |
 | `StopSandbox`                                | Suspension targets the exact owned Sandbox and confirms execution stopped; a successful RPC admission or route withdrawal alone is insufficient.                                                            |
 
-Names above are existing upstream fields/RPCs, not implemented OCE contracts. The provider's [configuration handler](https://github.com/NVIDIA/OpenShell/blob/dde8a9a57f34f9d998618b3d35821608165c980f/crates/openshell-server/src/grpc/policy.rs#L4387) checks instance and configuration consistency; live qualification must additionally prove that the Agent cannot obtain reporting credentials, forge acceptance or launch before admission. Observe provider-admitted baseline enrichment rather than trusting workload annotations.
+Names above are existing upstream fields/RPCs, not implemented OCE contracts. The provider's [configuration handler](https://github.com/NVIDIA/OpenShell/blob/021400be8af471f8669369e679de3e18cf0bd672/crates/openshell-server/src/grpc/policy.rs#L4387) checks instance and configuration consistency; live qualification must additionally prove that the Agent cannot obtain reporting credentials, forge acceptance or launch before admission. Observe provider-admitted baseline enrichment rather than trusting workload annotations.
 
 **Remaining dependency:** Supervisor/workload disconnect freezes execution, but gateway polling failures retain prior policy. Select and qualify a provider-local execution deadline or equivalent mechanism for loss of OCC observation authority. Admission inspection does not resolve that gap. No runtime capability or real-provider proof has been completed.
 
@@ -92,7 +92,7 @@ Start this separate runtime milestone after Installation enforcement qualifies a
 - [ ] Reject deletion while drafts or live/retiring revisions reference a policy; permit it after detach and completed retirement. Historical retired snapshots remain independent of the mutable resource.
 - [ ] Extend real API/PostgreSQL/worker/OpenShell coverage for authorization denials, cross-Namespace refusal, immutable active snapshots, ceiling changes and resource retirement.
 
-Additional execution modes remain separate reviewed milestones. Dedicated Codex needs its own protected transport qualification; gVisor/Kata, OAuth, repository credentials and other source types do not become supported through this change.
+Dedicated Codex's existing development path needs separate transport/evidence qualification. Additional execution modes remain reviewed milestones; gVisor/Kata, OAuth, repository credentials and other source types do not become supported through this change.
 
 Each runtime milestone updates its reference, guide, flow and integration coverage. The API cheat sheet is generated from its schema. Model credentials stay only in their authorized runtime/provider boundary. No simulated provider substitutes for required execution proof.
 
@@ -102,23 +102,23 @@ All capability rows below are planned, not executed. #919 owns its separate star
 
 Select the exact cases and prerequisites from the testing guides. Missing infrastructure or credentials keep the affected proof incomplete. Unit, injected-client and Kubernetes fixture results cannot replace required runtime integration. Record tested commits, provider/image digests, pass/fail/skip counts and proof limits with each runtime PR.
 
-| Required outcome                                        | Real workflow proof                                                                                                                                                                             |
-| ------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Allowed/denied actions and policy-before-child ordering | Pinned compatible provider with a real dedicated native OpenClaw turn; refusal before an Agent-owned child marker on unavailable enforcement.                                                   |
-| Trusted receipts and exact effective policy             | Reject Agent-written annotations/files/logs, Agent-forged or wrong-instance reports, unexpected baseline additions and mismatched translated digests.                                           |
-| No workload-originated policy widening                  | Admitted supervisor synchronization succeeds; widening sync, workload proposals/approvals and operator mutations cannot authorize an unadmitted policy.                                         |
-| Each traffic class stays within the snapshot            | Allowed/denied proxy requests, direct sockets, Pod peers and ingress; both conflicting Kubernetes/provider layer cases must deny.                                                               |
-| Drift cannot retain execution or routing                | Restart/re-sync, changed policy version/generation and lost observation/expired receipt gate execution and withdraw routes; matching evidence and authorization are required to recover.        |
-| Static ceiling identity and restart                     | Canonical configuration digests match across API/worker; tightening suspends prior first-milestone revisions, loosening preserves them until redeploy, and mixed configuration cannot activate. |
-| Network-policy visibility                               | Enforcing CNI and operator-reviewed cluster/plugin controls are part of real qualification; Compute claims only the selecting namespaced policies it can read.                                  |
-| Redeployment diagnostic                                 | API and Console show "redeploy required" for unsupported snapshots; release notes disclose the intentional stop before the milestone ships.                                                     |
-| Exact scope, ceiling, authorization and snapshot        | Real API/worker integration with PostgreSQL proves cross-Namespace refusal, ceiling rejection/tightening and immutable active revisions.                                                        |
-| Resource deletion and unsupported snapshots             | Reject deletion with draft/live/retiring references; allow after cleanup. Refuse activation/resume of revisions without canonical snapshots; redeploy requires admitted inputs.                 |
-| Identity, credentials and cleanup survive provisioning  | Pinned OpenShell Kubernetes workflow verifies projections, ready attachments, model turn and exact `harnessResource` revocation. Current stock projections block qualification.                 |
+| Required outcome                                        | Real workflow proof                                                                                                                                                                                                                   |
+| ------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Allowed/denied actions and policy-before-child ordering | Pinned compatible provider with a real dedicated native OpenClaw turn; refusal before an Agent-owned child marker on unavailable enforcement.                                                                                         |
+| Trusted receipts and exact effective policy             | Reject Agent-written annotations/files/logs, Agent-forged or wrong-instance reports, unexpected baseline additions and mismatched translated digests.                                                                                 |
+| No workload-originated policy widening                  | Admitted supervisor synchronization succeeds; widening sync, workload proposals/approvals and operator mutations cannot authorize an unadmitted policy.                                                                               |
+| Each traffic class stays within the snapshot            | Allowed/denied proxy requests, direct sockets, Pod peers and ingress; both conflicting Kubernetes/provider layer cases must deny.                                                                                                     |
+| Drift cannot retain execution or routing                | Restart/re-sync, changed policy version/generation and lost observation/expired receipt gate execution and withdraw routes; matching evidence and authorization are required to recover.                                              |
+| Static ceiling identity and restart                     | Canonical configuration digests match across API/worker; tightening suspends prior first-milestone revisions, loosening preserves them until redeploy, and mixed configuration cannot activate.                                       |
+| Network-policy visibility                               | Enforcing CNI and operator-reviewed cluster/plugin controls are part of real qualification; Compute claims only the selecting namespaced policies it can read.                                                                        |
+| Redeployment diagnostic                                 | API and Console show "redeploy required" for unsupported snapshots; release notes disclose the intentional stop before the milestone ships.                                                                                           |
+| Exact scope, ceiling, authorization and snapshot        | Real API/worker integration with PostgreSQL proves cross-Namespace refusal, ceiling rejection/tightening and immutable active revisions.                                                                                              |
+| Resource deletion and unsupported snapshots             | Reject deletion with draft/live/retiring references; allow after cleanup. Refuse activation/resume of revisions without canonical snapshots; redeploy requires admitted inputs.                                                       |
+| Identity, credentials and cleanup survive provisioning  | Real OpenShell workflow verifies exact requested identity or refusal, credentials, model turn and exact `harnessResource` revocation. Codex development files/passthrough and the native bridge are not production containment proof. |
 
 ## Open decisions
 
-Decision owners and binding invariants are listed in [RFC-0057](../rfcs/0057-agent-containment-policy.md#open-decisions). Resource/IAM maintainers own vocabulary/ceiling administration; Sandbox maintainers own supervisor qualification and governed mutation; Compute maintainers own generation/expiry/suspension; Harness and Credential Gateway maintainers own supported combinations. Acceptance of a document does not complete any delivery milestone.
+Decision owners and binding invariants are listed in [RFC-0019](../rfcs/0019-agent-containment-policy.md#open-decisions). Resource/IAM maintainers own vocabulary/ceiling administration; Sandbox maintainers own supervisor qualification and governed mutation; Compute maintainers own generation/expiry/suspension; Harness and Credential Gateway maintainers own supported combinations. Acceptance of a document does not complete any delivery milestone.
 
 | Decision                                                  | Owner and affected work                                                                           |
 | --------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
@@ -131,13 +131,15 @@ RFC review and implementation discovery can proceed together. The PR's owning-te
 
 ## Delivery record
 
-The foundation hardening in [PR #919](https://github.com/openclaw/openclaw-enterprise/pull/919) has merged; its adapter, startup-test, reference and flow changes are present on main. The Installation evidence and Namespace policy milestones in this plan have not shipped. Its head-bound validation and diagnostics remain in that PR. The Namespace resource, canonical containment snapshot and enforcement evidence are unimplemented. A compatible Landlock kernel, disposable Kubernetes fixtures, qualified upstream projections and authorized model credentials remain prerequisites for real-runtime proof.
+The foundation hardening in [PR #919](https://github.com/openclaw/openclaw-enterprise/pull/919) has merged; its adapter, startup-test, reference and flow changes are present on main. The Installation evidence and Namespace policy milestones in this plan have not shipped. Its head-bound validation and diagnostics remain in that PR. The Namespace resource, canonical containment snapshot and enforcement evidence are unimplemented. A compatible Landlock kernel, disposable Kubernetes fixtures, qualified workload identity/transport boundaries and authorized model credentials remain prerequisites for real-runtime proof.
 
 ## Manual Notes
 
 [keep this for the user to add notes. do not change between edits]
 
 ## Changelog
+
+- 2026-10-07: Renumbered the active proposal from RFC-0057 to RFC-0019 under current main rules, retained this existing plan filename and historical records, repaired owning-RFC links and refreshed OpenShell `v0.1.3-pre.2` development/qualification limits (inspected main `bb7d2a110`).
 
 - 2026-10-04: Selected existing isolated-supervisor admission and governance interceptors for qualification; mapped upstream fields to real adapter/lifecycle consumers and retained OCC observation expiry as an unresolved delivery requirement. The plan remains one coherent implementation workflow; review its length within the 1,500–2,500-word budget.
 
