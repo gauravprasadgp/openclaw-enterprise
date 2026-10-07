@@ -139,6 +139,8 @@ The foundation hardening in [PR #919](https://github.com/openclaw/openclaw-enter
 
 ## Changelog
 
+- 2026-10-08: Rename the unmerged primary plan to RFC-0019’s number and topic; resolve the index conflict using main’s status icons and Author column. RFC-0019 must be rechecked against the base immediately before human merge. Earlier records and Manual Notes remain unchanged.
+
 - 2026-10-07: Renumbered the active proposal from RFC-0057 to RFC-0019 under current main rules, retained this existing plan filename and historical records, repaired owning-RFC links and refreshed OpenShell `v0.1.3-pre.2` development/qualification limits (inspected main `bb7d2a110`).
 
 - 2026-10-04: Selected existing isolated-supervisor admission and governance interceptors for qualification; mapped upstream fields to real adapter/lifecycle consumers and retained OCC observation expiry as an unresolved delivery requirement. The plan remains one coherent implementation workflow; review its length within the 1,500–2,500-word budget.

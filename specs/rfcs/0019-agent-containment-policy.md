@@ -9,11 +9,11 @@ author: gauravprasadgp
 - **ID:** RFC-0019
 - **Owner:** OCC resource and IAM maintainers, with Sandbox and Kubernetes Compute maintainers
 - **Created:** 2026-10-03
-- **Last updated:** 2026-10-07
+- **Last updated:** 2026-10-08
 - **RFC PR:** [PR #1003](https://github.com/openclaw/openclaw-enterprise/pull/1003)
 - **Current references:** [Agents](../../docs/reference/agents.md), [Sandbox Driver](../../docs/reference/drivers/sandbox.md), and [runtime security](../../docs/reference/security/runtime-isolation.md)
 - **Architecture:** [Resources](../../docs/design/resources.md), [Drivers](../../docs/design/drivers.md), and [safeguards](../../docs/design/safeguards.md)
-- **Delivery:** [Implementation plan](../plans/0057-agent-containment-policy.md)
+- **Delivery:** [Implementation plan](../plans/0019-agent-containment-policy.md)
 - **Related:** [OpenShell hardening #919](https://github.com/openclaw/openclaw-enterprise/pull/919), [0.x egress decision](0017-agent-egress-0x/index.md), and [Sandbox credential injection](0016-sandbox-credential-injection.md)
 
 ## Problem and decision
@@ -90,7 +90,7 @@ Network qualification assumes a CNI that enforces Kubernetes NetworkPolicy and t
 
 ## Delivery and verification
 
-The [plan](../plans/0057-agent-containment-policy.md) separates evidence for Installation policy from the Namespace resource. Require real Agent workflow proof for trusted receipts, permitted/denied filesystem and network actions, pre-child refusal, credential placement, mutation rejection, restarts and observation loss. Test both Kubernetes-allow/provider-deny and provider-allow/Kubernetes-deny. Simulated providers and declared facets do not qualify production.
+The [plan](../plans/0019-agent-containment-policy.md) separates evidence for Installation policy from the Namespace resource. Require real Agent workflow proof for trusted receipts, permitted/denied filesystem and network actions, pre-child refusal, credential placement, mutation rejection, restarts and observation loss. Test both Kubernetes-allow/provider-deny and provider-allow/Kubernetes-deny. Simulated providers and declared facets do not qualify production.
 
 [PR #919](https://github.com/openclaw/openclaw-enterprise/pull/919) merged on 2026-10-03 as `f34d220290c3246d9d61c6ee4ff73696ac836161`, requiring mandatory Landlock policy compatibility and rejecting weaker Installation settings. The pinned provider already requires a mandatory capability baseline; generic unavailable-kernel refusal does not demonstrate that flag's effect. That hardening does not deliver the canonical policy snapshot, trusted evidence or a qualified production containment path.
 
