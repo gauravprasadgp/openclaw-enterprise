@@ -49,6 +49,30 @@ export function isSecretMetadata(secret, namespaceId) {
   );
 }
 
+// Secret names this page session resolved, per signed-in operator. A rebuilt summary shows the
+// name it had while the reread runs, instead of the raw ID and "Loading metadata…" for a moment,
+// which wrapped and moved the cards below (finding 1482).
+const resolvedSecretNames = new Map();
+/** Forgets the resolved names, as sign-out forgets other private state. */
+export function clearResolvedSecretNames() {
+  resolvedSecretNames.clear();
+}
+const secretNameKey = (context, secretId) =>
+  context.operatorId ? JSON.stringify([context.operatorId, context.namespaceId, secretId]) : null;
+
+function secretMetadataLink(href, name) {
+  return element(
+    "a",
+    {
+      href,
+      target: "_blank",
+      rel: "noopener",
+      title: "View Secret metadata (opens in new tab)",
+    },
+    name,
+  );
+}
+
 // Resolve only the referenced resource: list permission is not required to read a binding.
 export function renderSecretReference(context, source) {
   const node = element("span", { className: "secret-reference", role: "status" });
@@ -62,10 +86,16 @@ export function renderSecretReference(context, source) {
     return node;
   }
   const bound = `Bound Secret · ${source.id}`;
-  node.textContent = `${bound} · Loading metadata…`;
   if (typeof context.request !== "function") {
     node.textContent = `${bound} · Metadata unavailable`;
     return node;
+  }
+  const key = secretNameKey(context, source.id);
+  const known = key === null ? undefined : resolvedSecretNames.get(key);
+  if (known === undefined) {
+    node.textContent = `${bound} · Loading metadata…`;
+  } else {
+    node.replaceChildren(secretMetadataLink(href, known));
   }
   context
     .request(href)
@@ -74,26 +104,23 @@ export function renderSecretReference(context, source) {
         return;
       }
       if (!isSecretMetadata(secret, context.namespaceId) || secret.id !== source.id) {
+        resolvedSecretNames.delete(key);
         node.textContent = `${bound} · Metadata unavailable`;
         return;
       }
-      node.replaceChildren(
-        element(
-          "a",
-          {
-            href,
-            target: "_blank",
-            rel: "noopener",
-            title: "View Secret metadata (opens in new tab)",
-          },
-          secretOptionLabel(secret),
-        ),
-      );
+      const name = secretOptionLabel(secret);
+      if (key !== null) {
+        resolvedSecretNames.set(key, name);
+      }
+      if (name !== known) {
+        node.replaceChildren(secretMetadataLink(href, name));
+      }
     })
     .catch((error) => {
       if (context.isCurrent && !context.isCurrent()) {
         return;
       }
+      resolvedSecretNames.delete(key);
       node.textContent = `${bound} · Metadata unavailable${error.status === 403 ? " (access denied)" : ""}`;
       if (error.status === 401) {
         context.onExpired?.();
@@ -172,9 +199,6 @@ export function createSecretReferenceField({
   const status = element("p", { id: `${id}-status`, className: "hint", role: "status" });
   const metadataLink = credentialLink("#", metadataLabel);
   const secrets = [];
-  let loaded = false;
-  let loading = false;
-  let selectedSecret = null;
   // Set once a binding is staged, so a Secret list that arrives later keeps its hint.
   let staged = false;
   let manuallyDisabled = disabled;
@@ -372,7 +396,6 @@ export function createSecretReferenceField({
     input.disabled = true;
     closeListbox({ restoreSelection: false });
     status.className = "hint";
-    selectedSecret = secret;
     try {
       await onSecretSelected(secret);
       if (!secrets.some((item) => item.id === secret.id)) {
@@ -584,7 +607,6 @@ export function createSecretReferenceField({
   } else {
     setSecretOptions();
     status.textContent = "Loading available Secrets...";
-    loading = true;
     context
       .request(`${namespacePath(context.namespaceId)}/secrets`)
       .then((items) => {
@@ -597,8 +619,6 @@ export function createSecretReferenceField({
         // A Secret created or chosen while this read was pending is newer than the list.
         const added = secrets.filter((secret) => !listed.some((item) => item.id === secret.id));
         secrets.splice(0, secrets.length, ...listed, ...added);
-        loaded = true;
-        loading = false;
         setSecretOptions({ preserveSearch: true });
         if (!staged) {
           status.className = "hint";
@@ -612,7 +632,6 @@ export function createSecretReferenceField({
         if (!isCurrent()) {
           return;
         }
-        loading = false;
         status.className = "error";
         status.textContent =
           error.status === 401
@@ -705,18 +724,6 @@ export function createSecretReferenceField({
     refresh() {
       setSecretOptions();
       updateValidity();
-    },
-    get selectedSecret() {
-      return selectedSecret;
-    },
-    get selectedSecretId() {
-      return currentSecretId();
-    },
-    get loaded() {
-      return loaded;
-    },
-    get loading() {
-      return loading;
     },
   };
 }

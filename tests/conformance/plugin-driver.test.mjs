@@ -193,8 +193,7 @@ test("Plugin approver translation keeps Agent, plugin, and exact scoped tool ove
       tools: { [toolId]: { approvers: [second] } },
     }),
     [],
-    undefined,
-    [first],
+    { pluginApprovers: [first] },
   );
   assert.deepEqual(codex.approvals.plugin.slack, {
     approvers: [first.id],
@@ -202,7 +201,7 @@ test("Plugin approver translation keeps Agent, plugin, and exact scoped tool ove
       linear: { approvers: [], tools: { [toolId]: { approvers: [second.id] } } },
     },
   });
-  assert.deepEqual(codexOpenClawConfiguration({}, [], undefined, []).approvals, {
+  assert.deepEqual(codexOpenClawConfiguration({}, [], { pluginApprovers: [] }).approvals, {
     plugin: { slack: { approvers: [] } },
   });
   assert.deepEqual(
@@ -697,6 +696,112 @@ setInterval(() => {}, 1_000);
   assert.equal(alive, false, "the aborted Codex app-server must not outlive the request");
 });
 
+test("Codex native catalog rejects a non-object response without escaping discovery", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "oce-codex-catalog-shape-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const executable = join(directory, "codex-fixture.mjs");
+  // The configured peer writes valid JSON with an invalid JSON-RPC envelope.
+  // Exercise the public Driver and real OS pipes, not a substituted reader.
+  await writeFile(
+    executable,
+    `#!/usr/bin/env node
+process.stdin.once("data", () => process.stdout.write("null\\n"));
+`,
+  );
+  await chmod(executable, 0o755);
+  const driver = new CodexPluginDriver({
+    codexExecutable: executable,
+    codexHome: directory,
+    requestTimeoutMs: 1_000,
+  });
+  await assert.rejects(driver.listCatalog(context("dedicated")), (error) => {
+    assert.ok(error instanceof NotImplementedError);
+    assert.match(error.message, /returned an invalid JSON-RPC response/);
+    return true;
+  });
+});
+
+test("Codex native catalog rejects a malformed plugin/list result as discovery failure", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "oce-codex-catalog-result-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const executable = join(directory, "codex-fixture.mjs");
+  const resultFile = join(directory, "plugin-list-result.json");
+  // Valid envelopes from a logged-in account; only the plugin/list result varies.
+  await writeFile(
+    executable,
+    `#!/usr/bin/env node
+import { readFileSync } from "node:fs";
+import { createInterface } from "node:readline";
+
+createInterface({ input: process.stdin }).on("line", (line) => {
+  const message = JSON.parse(line);
+  if (message.method === "initialized") return;
+  const result =
+    message.method === "account/read"
+      ? { account: { type: "chatgpt" } }
+      : message.method === "plugin/list"
+        ? JSON.parse(readFileSync(${JSON.stringify(resultFile)}, "utf8"))
+        : {};
+  console.log(JSON.stringify({ id: message.id, result }));
+});
+`,
+  );
+  await chmod(executable, 0o755);
+  const driver = new CodexPluginDriver({
+    codexExecutable: executable,
+    codexHome: directory,
+    requestTimeoutMs: 5_000,
+  });
+  const listWith = async (result) => {
+    await writeFile(resultFile, JSON.stringify(result));
+    return await driver.listCatalog(context("dedicated"));
+  };
+  const curated = (plugins) => ({ marketplaces: [{ name: "openai-curated-remote", plugins }] });
+
+  // Control: the same fixture serves a well-formed catalog.
+  assert.deepEqual(
+    (await listWith(codexCatalogFixture())).map((entry) => entry.id),
+    [linearPluginId, calendarPluginId, thirdPluginId],
+  );
+  for (const empty of [
+    { marketplaces: [] },
+    { marketplaces: [{ name: "another-marketplace", plugins: [] }] },
+    curated([]),
+  ]) {
+    assert.deepEqual(await listWith(empty), []);
+  }
+  const malformed = {
+    "null result": null,
+    "array result": [],
+    "string result": "catalog",
+    "result without marketplaces": {},
+    "null marketplaces": { marketplaces: null },
+    "curated marketplace without plugins": curated(undefined),
+    "null curated plugin list": curated(null),
+    "non-array curated plugin list": curated({}),
+    "null plugin summary": curated([null]),
+    "plugin without an ID": curated([{ remotePluginId: "linear" }]),
+    "plugin from another marketplace": curated([
+      { id: "linear@openai-internal-testing", remotePluginId: "linear" },
+    ]),
+  };
+  for (const [name, result] of Object.entries(malformed)) {
+    await assert.rejects(
+      listWith(result),
+      (error) => {
+        assert.ok(error instanceof NotImplementedError, `${name}: ${error}`);
+        assert.equal(
+          error.message,
+          "Codex plugin catalog discovery returned an invalid plugin catalog.",
+          name,
+        );
+        return true;
+      },
+      name,
+    );
+  }
+});
+
 test("Codex startup default-denies plugins", () => {
   const empty = codexRuntimeArtifact({}, []);
   assert.equal(empty.kind, "codex");
@@ -706,7 +811,7 @@ test("Codex startup default-denies plugins", () => {
     remote_plugin: false,
   });
   assert.deepEqual(empty.configuration.apps, { _default: { enabled: false } });
-  assert.deepEqual(empty.configuration.plugins, {});
+  assert.deepEqual(empty.configuration.plugins, { _default: { enabled: false } });
   assert.deepEqual(empty.installs, []);
 });
 
@@ -723,8 +828,7 @@ test("Codex bridge keeps runtime binaries readable after the last plugin is remo
 
 test("Codex bridge configuration carries repository broker network policy without plugins", () => {
   const bridgeConfiguration = codexOpenClawConfiguration({}, [], {
-    host: "git.tenant.svc",
-    domains: { "github.com": "allow" },
+    repositoryBrokerNetworkPolicy: { host: "git.tenant.svc", domains: { "github.com": "allow" } },
   });
 
   assert.deepEqual(bridgeConfiguration.plugins.entries.codex.config, {
@@ -778,6 +882,12 @@ test("Codex startup translation renders selected marketplace app plugins", () =>
   const bridgeConfiguration = codexOpenClawConfiguration(selections);
 
   assert.equal(artifact.kind, "codex");
+  assert.deepEqual(artifact.configuration.plugins, {
+    _default: { enabled: false },
+    "linear@openai-curated-remote": { enabled: true },
+    "google-calendar@openai-curated-remote": { enabled: true },
+    "third-plugin@openai-curated-remote": { enabled: true },
+  });
   assert.deepEqual(artifact.configuration.apps, {
     _default: { enabled: false },
     asdk_app_69a089a326dc8191b32a3f2553f5be2c: {
@@ -834,6 +944,45 @@ test("Codex startup translation renders selected marketplace app plugins", () =>
       registry: "openai-curated-remote",
     },
   ]);
+});
+
+test("Codex activates selected skills independently of app tools", () => {
+  const skillPluginId = "codex-plugin:writing@openai-curated-remote";
+  const skillDetail = codexDetail("writing", [], { skills: [{ name: "draft" }] });
+  const selections = {
+    ...codexSelection(linearPluginId, { toolDefaults: { enabled: false } }),
+    ...codexSelection(skillPluginId),
+  };
+  const artifact = codexRuntimeArtifact(selections, [
+    codexDetail("linear", ["app_notes"], { skills: [{ name: "notes" }] }),
+    skillDetail,
+  ]);
+  assert.deepEqual(artifact.configuration.plugins, {
+    _default: { enabled: false },
+    "linear@openai-curated-remote": { enabled: true },
+    "writing@openai-curated-remote": { enabled: true },
+  });
+  assert.deepEqual(artifact.configuration.apps, {
+    _default: { enabled: false },
+    app_notes: {
+      enabled: true,
+      default_tools_enabled: false,
+      default_tools_approval_mode: "auto",
+    },
+  });
+
+  // Aliases cannot represent separate install outcomes for one native plugin.
+  const aliases = {
+    ...codexSelection(skillPluginId),
+    "writing@openai-curated-remote": { enabled: true },
+  };
+  for (const enabled of [true, false]) {
+    aliases["writing@openai-curated-remote"].enabled = enabled;
+    assert.throws(
+      () => codexRuntimeArtifact(aliases, [skillDetail]),
+      /duplicate native plugin IDs/,
+    );
+  }
 });
 
 test("Codex startup translation preserves explicit approval defaults and routed reviewer selection", () => {
@@ -1114,12 +1263,7 @@ test("Codex startup translation fails selected-only policy gaps at startup", () 
     ],
     ...["hooks", "mcpServers", "scheduledTasks"].map((field) => [
       codexSelection(linearPluginId),
-      [
-        codexDetail("linear", ["app"], {
-          skills: [{ name: "linear-workflow" }],
-          [field]: [{ id: "native" }],
-        }),
-      ],
+      [codexDetail("linear", [], { skills: [{ name: "draft" }], [field]: [{ id: "native" }] })],
       new RegExp(field, "i"),
     ]),
     [

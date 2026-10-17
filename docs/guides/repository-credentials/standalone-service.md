@@ -94,6 +94,10 @@ node "$credential_client" \
   /absolute/path/sessions/task git push origin HEAD:refs/heads/agent-feature
 ```
 
+The launcher forwards SIGINT/SIGTERM. A child terminated by these signals returns
+130/143. An interrupted remote command may already have changed the repository;
+inspect its result before retrying.
+
 Use credential-free HTTPS URLs; the selected session helper supplies authentication.
 Git keeps its normal configuration, hooks and worktrees. These native settings
 are overridable defaults, so operators remain responsible for inherited URL
@@ -227,7 +231,7 @@ docker compose -f deploy/examples/repository-credentials/compose.yaml run --rm -
 
 Rendering Compose checks declared configuration. To verify delivered separation,
 inspect the running service/client mounts and client surfaces using the
-[container qualification procedure](../../testing/repository-credentials-artifacts.md#verify-separate-running-containers).
+[container qualification procedure](../../testing/repository-credentials.md#verify-separate-running-containers).
 Also verify approved client connectivity and denied access from an unapproved
 workload and the relevant external network, without copying a session bearer
 into reachability probes. Neither a Compose rendering nor image inspection

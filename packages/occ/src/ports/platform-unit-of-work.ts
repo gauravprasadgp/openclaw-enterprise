@@ -13,6 +13,7 @@ export function bindPlatformUnitOfWork(
       "getInstallation",
       "createInstallation",
       "holdPrincipalAccount",
+      "holdAuthenticationSession",
     ]),
     namespaces: bindRepository(repositories.namespaces, lifetime, [
       "findNamespace",
@@ -39,6 +40,7 @@ export function bindPlatformUnitOfWork(
     presets: bindRepository(repositories.presets, lifetime, [
       "findPreset",
       "listPresets",
+      "listPresetSummaries",
       "createPreset",
       "lockPreset",
       "updatePreset",
@@ -63,9 +65,11 @@ export function bindPlatformUnitOfWork(
       "replaceCredentialSourceSecrets",
       "deleteCredentialSource",
       "hasReferences",
+      "findBlockingReference",
       "findCredentialWithdrawal",
       "listCredentialWithdrawals",
       "requestCredentialWithdrawal",
+      "reassignCredentialWithdrawal",
       "recordCredentialWithdrawalAttempt",
       "markCredentialWithdrawalRevoked",
     ]),
@@ -78,6 +82,7 @@ export function bindPlatformUnitOfWork(
       "updateCredential",
       "deleteServiceAccount",
       "hasReferences",
+      "findIssuedCredentialBinding",
     ]),
     workspaceSetups: bindRepository(repositories.workspaceSetups, lifetime, [
       "find",
@@ -90,6 +95,7 @@ export function bindPlatformUnitOfWork(
       "listAgentsForBrowsing",
       "findAgent",
       "listAgents",
+      "listAgentReferences",
       "createAgent",
       "lockAgent",
       "updateConfiguration",
@@ -103,6 +109,8 @@ export function bindPlatformUnitOfWork(
       "listRevisionsForBrowsing",
       "findRevision",
       "listRevisions",
+      "listRevisionMetadata",
+      "pageRevisionSummaries",
       "createRevision",
     ]),
     iamPolicy: bindRepository(repositories.iamPolicy, lifetime, [
@@ -146,6 +154,7 @@ export function bindPlatformUnitOfWork(
       "settleEffect",
       "cancel",
       "cancelByAgent",
+      "settleAbandonedEffect",
       "retryByWorkId",
       "releaseConfiguration",
     ]),
@@ -158,6 +167,7 @@ export function bindPlatformUnitOfWork(
       "hasOutstandingCredentialWithdrawalWork",
       "retryFailedAgentDeletion",
       "retryFailedNamespaceDeletion",
+      "expediteCredentialWithdrawalWork",
     ]),
   });
 }

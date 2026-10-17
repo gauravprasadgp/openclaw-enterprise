@@ -19,56 +19,6 @@ const PLUGIN_SETUP = {
   url: "https://github.com/openclaw/openclaw-enterprise/blob/main/docs/reference/drivers/plugin-bundled.md#selection-and-catalogs",
 };
 
-function oauthIdentity(value: string): {
-  accessToken: string;
-  accountId: string;
-  isFedramp: boolean;
-} {
-  try {
-    const wrapper = asRecord(JSON.parse(value));
-    const auth = asRecord(wrapper?.auth);
-    const tokens = asRecord(auth?.tokens);
-    if (
-      wrapper?.version !== 1 ||
-      wrapper.provider !== "codex" ||
-      wrapper.state !== "ready" ||
-      auth?.auth_mode !== "chatgpt" ||
-      !isNonEmptyString(tokens?.access_token) ||
-      tokens.access_token.length > 16384 ||
-      /[\s\p{Cc}]/u.test(tokens.access_token) ||
-      !isNonEmptyString(tokens.account_id) ||
-      tokens.account_id.length > 256 ||
-      /[\s\p{Cc}]/u.test(tokens.account_id) ||
-      !isNonEmptyString(tokens.id_token)
-    ) {
-      throw new Error();
-    }
-    const segments = tokens.id_token.split(".");
-    if (segments.length !== 3) {
-      throw new Error();
-    }
-    // This is native login state supplied by the server, never browser-provided identity.
-    const claims = asRecord(JSON.parse(Buffer.from(segments[1]!, "base64url").toString("utf8")));
-    const identity = asRecord(claims?.["https://api.openai.com/auth"]);
-    if (
-      !claims ||
-      (identity?.chatgpt_account_id !== undefined &&
-        identity.chatgpt_account_id !== tokens.account_id) ||
-      (identity?.chatgpt_account_is_fedramp !== undefined &&
-        typeof identity.chatgpt_account_is_fedramp !== "boolean")
-    ) {
-      throw new Error();
-    }
-    return {
-      accessToken: tokens.access_token,
-      accountId: tokens.account_id,
-      isFedramp: identity?.chatgpt_account_is_fedramp === true,
-    };
-  } catch {
-    throw new PluginDiscoveryError("credentials_rejected");
-  }
-}
-
 function invalid(): never {
   throw new PluginDiscoveryError("invalid_response");
 }
@@ -137,9 +87,15 @@ async function withCredential<T>(
   run: (request: (path: string, body?: unknown) => Promise<Record<string, unknown>>) => Promise<T>,
 ): Promise<T> {
   if (
-    (input.accessToken === undefined) === (input.credential === undefined) ||
-    (input.accessToken !== undefined &&
-      (!input.accessToken.startsWith("at-") || /[\s\p{Cc}]/u.test(input.accessToken)))
+    !isNonEmptyString(input.accessToken) ||
+    input.accessToken.length > 16384 ||
+    /[\s\p{Cc}]/u.test(input.accessToken) ||
+    (input.accountId === undefined
+      ? !input.accessToken.startsWith("at-")
+      : !isNonEmptyString(input.accountId) ||
+        input.accountId.length > 256 ||
+        /[\s\p{Cc}]/u.test(input.accountId)) ||
+    (input.isFedramp !== undefined && typeof input.isFedramp !== "boolean")
   ) {
     throw new PluginDiscoveryError("credentials_rejected");
   }
@@ -149,8 +105,11 @@ async function withCredential<T>(
     let accessToken: string;
     let accountId: string;
     let isFedramp: boolean;
-    if (input.credential !== undefined) {
-      ({ accessToken, accountId, isFedramp } = oauthIdentity(input.credential.value));
+    if (input.accountId !== undefined) {
+      // Account metadata accompanies the warm token from the trusted Credential Gateway.
+      accessToken = input.accessToken;
+      accountId = input.accountId;
+      isFedramp = input.isFedramp === true;
     } else {
       accessToken = input.accessToken!;
       // Account authority comes from the PAT issuer, never a browser-provided account ID.
@@ -190,7 +149,7 @@ async function withCredential<T>(
         }),
       ),
     );
-    // The opaque OAuth wrapper differs from the bearer value an upstream response could echo.
+    // Provider results must never echo the warm bearer credential into Console responses.
     if (JSON.stringify(result)?.includes(JSON.stringify(accessToken).slice(1, -1))) {
       invalid();
     }
@@ -222,7 +181,7 @@ function catalogEntry(value: unknown): PluginCatalogEntry {
   }
   const apps = array(release.app_ids, 100).map((id) => text(id, 256));
   // Native Codex loads skills from the installed bundle; validate catalog metadata here.
-  array(release.skills, 1000);
+  const skills = array(release.skills, 1000);
   if (
     !["AVAILABLE", "INSTALLED_BY_DEFAULT", "NOT_AVAILABLE"].includes(
       String(plugin.installation_policy),
@@ -251,12 +210,12 @@ function catalogEntry(value: unknown): PluginCatalogEntry {
         unavailableReason =
           "Unavailable for this account. Ask a ChatGPT workspace administrator to review plugin access; the service did not provide a recognized reason.";
     }
-  } else if (release.requires_local_executor !== false) {
-    // The list can rule out local executors; details still check native component support.
+  } else if (release.requires_local_executor !== false && skills.length === 0) {
+    // Skills use the native runtime; details must still check other local components.
     unavailableReason =
-      "This plugin requires a local executor that OCE hosted discovery does not support. Changing ChatGPT access will not enable it here.";
-  } else if (apps.length === 0) {
-    unavailableReason = "This plugin has no concrete hosted app supported by OCE.";
+      "This plugin requires local components that OCE hosted discovery does not support. Changing ChatGPT access will not enable it here.";
+  } else if (apps.length === 0 && skills.length === 0) {
+    unavailableReason = "This plugin has no concrete hosted app or skills supported by OCE.";
   }
   const presentation = record(release.interface);
   const description = presentation.short_description ?? release.description;
@@ -367,12 +326,15 @@ export async function getHostedPlugin(
       invalid();
     }
     if (appIds.length === 0) {
+      if (entry.available !== false && array(release.skills, 1000).length > 0) {
+        return { ...entry, tools: [] };
+      }
       return entry.available === false
         ? entry
         : {
             ...entry,
             available: false,
-            unavailableReason: "This plugin has no concrete hosted app supported by OCE.",
+            unavailableReason: "This plugin has no concrete hosted app or skills supported by OCE.",
             unavailableHelp: PLUGIN_SETUP,
           };
     }

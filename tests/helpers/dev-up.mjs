@@ -8,7 +8,6 @@ import {
   readFile,
   rename,
   rm,
-  stat,
   symlink,
   writeFile,
 } from "node:fs/promises";
@@ -51,6 +50,8 @@ function developmentCli() {
   return cliBuild;
 }
 
+// Node stand-ins use process.getBuiltinModule, not require: they load as ESM when TMPDIR is
+// inside this repo, whose package.json sets type=module.
 async function writeExecutable(path, body) {
   await writeFile(path, body, { mode: 0o755 });
   await chmod(path, 0o755);
@@ -106,8 +107,8 @@ async function createFixture(t, options = {}) {
   await writeExecutable(
     join(bin, engine),
     `#!${nodeExecutable}
-const fs = require("node:fs");
-const { spawnSync } = require("node:child_process");
+const fs = process.getBuiltinModule("node:fs");
+const { spawnSync } = process.getBuiltinModule("node:child_process");
 const args = process.argv.slice(2);
 const engine = ${JSON.stringify(engine)};
 const podmanJsonConfig = ${JSON.stringify(options.podmanJsonConfig ?? false)};
@@ -182,11 +183,15 @@ if (args[0] === "version") {
   const platform = ${JSON.stringify(options.dockerPlatformName ?? "Docker Engine - Community")};
   const server = engine === "docker"
     ? { Platform: { Name: platform }, Components: [{ Name: "Engine" }] }
-    : { Platform: { Name: "Podman Engine" }, Components: [{ Name: "Podman Engine" }] };
+    : {
+        Platform: { Name: podmanDockerApi ? "linux/amd64/fedora-40" : "Podman Engine" },
+        Components: podmanDockerApi
+          ? [{ Name: "Podman Engine" }, { Name: "Engine" }]
+          : [{ Name: "Podman Engine" }],
+      };
   if (args.includes("{{json .Server}}") && (engine === "docker" || podmanDockerApi)) {
     process.stdout.write(JSON.stringify(server) + "\\n");
-  } else if (engine === "docker") process.stdout.write(platform + "\\n");
-  else if (podmanDockerApi) process.stdout.write("Podman Engine\\n");
+  } else if (engine === "docker" || podmanDockerApi) process.stdout.write(server.Platform.Name + "\\n");
   else exit(1);
   exit(0);
 }
@@ -336,10 +341,10 @@ exit(99, "unhandled " + engine + " compose command: " + command);
   await writeExecutable(
     join(fixtureRepository, "bin", "occ"),
     `#!${nodeExecutable}
-const fs = require("node:fs");
+const fs = process.getBuiltinModule("node:fs");
 const args = process.argv.slice(2);
 if (args[0] === "dev") {
-  const { spawnSync } = require("node:child_process");
+  const { spawnSync } = process.getBuiltinModule("node:child_process");
   const result = spawnSync(${JSON.stringify(cli)}, args, { env: process.env, stdio: "inherit" });
   process.exit(result.status ?? 1);
 }
@@ -383,8 +388,13 @@ process.exit(86);
   const dockerLog = engine === "docker" ? engineLog : join(directory, "docker.log");
   const podmanLog = engine === "podman" ? engineLog : join(directory, "podman.log");
   const occLog = join(directory, "occ.log");
+  // Settings exported in the caller's shell would override the defaults the
+  // tests assert (for example OCC_DEVELOPMENT_K3S_IMAGE's +v1.35 channel).
+  const inherited = Object.fromEntries(
+    Object.entries(process.env).filter(([key]) => !key.startsWith("OCC_DEVELOPMENT_")),
+  );
   const env = {
-    ...process.env,
+    ...inherited,
     PATH: engine === "podman" ? bin : `${bin}${delimiter}${process.env.PATH ?? ""}`,
     OPENAI_API_KEY: "",
     OCC_DEVELOPMENT_COMPUTE_DRIVER: "docker",
@@ -463,8 +473,8 @@ async function prepareLifecycleCommands(fixture, scenario = "success", options =
     await writeExecutable(
       join(bin, command),
       `#!${nodeExecutable}
-const fs = require("node:fs");
-const { spawnSync } = require("node:child_process");
+const fs = process.getBuiltinModule("node:fs");
+const { spawnSync } = process.getBuiltinModule("node:child_process");
 const args = process.argv.slice(2);
 const command = ${JSON.stringify(command)};
 const engine = ${JSON.stringify(engine)};
@@ -534,9 +544,9 @@ if (command === engine) {
       ["openclaw-enterprise-runtime:kubernetes-quickstart", "a".repeat(64)],
       ["openclaw-enterprise-controller:kubernetes-quickstart", "b".repeat(64)],
       ["openclaw-development/import-b9b4e5950649:occ-dev-owned", "c".repeat(64)],
-      ["openclaw-development/openshell-gateway:occ-dev-owned", "17b2f65d1e33f32a419ecc98dd42389b0227280be54139c14834933ec29420ea"],
-      ["openclaw-development/openshell-sandbox:occ-dev-owned", "b46ed57b080946d0fe80490dbe1441ebf4a83c6eec79369ddbcfc49ec19dc0cf"],
-      ["openclaw-development/openshell-supervisor:occ-dev-owned", "971d71f45f677a7b1084385322bae4ac6fd09e9450e680684ab79a04d07c5c9f"],
+      ["openclaw-development/openshell-gateway:occ-dev-owned", "bdb4fe248070032c88be78f029dad9325cb698480e90486e1413a674a5d8edc8"],
+      ["openclaw-development/openshell-sandbox:occ-dev-owned", "ca00c094aeaa60681b8196cda18ab3c5dd5f7d782d4c36798256427b67599070"],
+      ["openclaw-development/openshell-supervisor:occ-dev-owned", "aa681d8264af6ee860e38349ed3c76609a51778eb6d0f02743df03787b80a290"],
     ].map(([name, digest]) => importedTag(name) + " application/vnd.oci.image.manifest.v1+json sha256:" + digest).join("\\n"));
   } else if (args[0] === "cp") {
     fs.writeFileSync(args.at(-1), JSON.stringify({ data: { id: "key_fixture", key: ${JSON.stringify(serviceKey)} }, meta: { installationId: ${JSON.stringify(matchingInstallationId)} } }));

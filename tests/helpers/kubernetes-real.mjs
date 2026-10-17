@@ -1,5 +1,6 @@
 import { sha256Hex } from "../../packages/utils/src/index.ts";
 import assert from "node:assert/strict";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { execFile, spawn } from "node:child_process";
 import { randomBytes, randomUUID } from "node:crypto";
 import { once } from "node:events";
@@ -15,22 +16,40 @@ export function kubectlArguments({ kubeconfigPath, kubernetesContext }, args) {
   return ["--kubeconfig", kubeconfigPath, "--context", kubernetesContext, ...args];
 }
 
+// The deadline signal of the failure diagnostic running in this async context, if any.
+const diagnosticDeadline = new AsyncLocalStorage();
+
+// Whether the failure diagnostic this code runs in has passed its deadline, so it should
+// write nothing more.
+export function diagnosticDeadlinePassed() {
+  return diagnosticDeadline.getStore()?.aborted === true;
+}
+
 async function kubectlFor(selection, ...args) {
+  // Inside a failure diagnostic, kubectl stops at its deadline (finding 1557).
+  const signal = diagnosticDeadline.getStore();
+  signal?.throwIfAborted();
   const { stdout } = await execute("kubectl", kubectlArguments(selection, args), {
     maxBuffer: 4 * 1024 * 1024,
+    signal,
   });
   return stdout;
 }
 
 // kubectl reports a dropped API server or kubelet stream on stderr: an exec
-// WebSocket that closed mid-stream ("error: EOF"), a reset or refused
-// connection, or a kubelet tunnel that could not be dialed. A remote command
-// that ran and failed ends with "command terminated with exit code N"; that is
-// the command's own result and is never retried.
+// WebSocket that closed mid-stream ("error: EOF"), an API request whose
+// connection closed before the reply ('Post "https://...": EOF'), a reset or
+// refused connection, or a kubelet tunnel that could not be dialed. A remote
+// command that ran and failed ends with "command terminated with exit code N";
+// that is the command's own result and is never retried.
 const transientKubectlFailure =
-  /^error: EOF$|Unable to connect to the server|error dialing backend|websocket: close|unexpected EOF|connection reset by peer|connection refused|http2: client connection lost|TLS handshake timeout|i\/o timeout|the server is currently unable to handle the request|etcdserver: request timed out/m;
+  /^error: EOF$|"https?:\/\/[^"\s]+": EOF$|Unable to connect to the server|error dialing backend|websocket: close|unexpected EOF|connection reset by peer|connection refused|http2: client connection lost|TLS handshake timeout|i\/o timeout|the server is currently unable to handle the request|etcdserver: request timed out/m;
 
 export function isTransientKubectlFailure(error) {
+  // A read a diagnostic deadline stopped is not retried, whatever kubectl wrote first.
+  if (error?.name === "AbortError") {
+    return false;
+  }
   // A spawn failure (ENOENT, EACCES) has empty stderr: kubectl never ran.
   const stderr = String(error?.stderr ?? "");
   return !/command terminated with exit code/.test(stderr) && transientKubectlFailure.test(stderr);
@@ -64,6 +83,67 @@ export async function retryKubectlRead(
       delayMs *= 2;
     }
   }
+}
+
+// A failure diagnostic must not hide the failure it explains (finding 1550): a stalled API
+// server or log stream would hold it until the test's own timeout. Its kubectl reads pass
+// diagnosticRequestTimeout, and the whole diagnostic races diagnosticDeadlineMs; past the
+// deadline the caller gets `timedOut` in place of the diagnostic and reports its failure.
+export const diagnosticRequestTimeout = "--request-timeout=20s";
+export const diagnosticDeadlineMs = 60_000;
+
+// Runs `diagnostic(signal)` within the deadline. At the deadline the signal aborts: a kubectl
+// read it started is killed and a later one refused, so no read outlives the deadline or keeps
+// the test process alive, and the diagnostic checks diagnosticDeadlinePassed() before it
+// writes (finding 1557). A diagnostic nested in another one also stops at the outer deadline.
+export async function withinDiagnosticDeadline(
+  diagnostic,
+  { timeoutMs = diagnosticDeadlineMs, timedOut = "Diagnostic timed out" } = {},
+) {
+  const deadline = new AbortController();
+  const outer = diagnosticDeadline.getStore();
+  const signal = outer === undefined ? deadline.signal : AbortSignal.any([outer, deadline.signal]);
+  const timer = new AbortController();
+  try {
+    return await Promise.race([
+      diagnosticDeadline.run(signal, () => diagnostic(signal)),
+      delay(timeoutMs, undefined, { signal: timer.signal }).then(() => {
+        deadline.abort();
+        return timedOut;
+      }),
+    ]);
+  } finally {
+    // Stops the timer once the diagnostic settles, so it does not hold the event loop.
+    timer.abort();
+  }
+}
+
+const alreadyCreated = /^Error from server \(AlreadyExists\): /m;
+
+// A second delete of a Namespace that the dropped attempt already started removing.
+export const namespaceAlreadyTerminating =
+  /^Error from server \(Conflict\): .*The system is ensuring all content is removed from this namespace/m;
+
+// Retries a kubectl write whose transport dropped. The dropped attempt may or
+// may not have been applied, so only writes that converge when repeated belong
+// here: label and annotate with --overwrite, apply, delete with
+// --ignore-not-found, and create. After a dropped attempt, an error matching
+// `applied` (by default AlreadyExists, for a create) means that attempt was
+// applied; before one it is thrown. That assumes nobody else writes the same
+// object, so use it only for names the test owns.
+export async function retryKubectlWrite(write, { applied = alreadyCreated, ...options } = {}) {
+  let dropped = false;
+  return retryKubectlRead(async () => {
+    try {
+      return await write();
+    } catch (error) {
+      if (dropped && applied.test(String(error?.stderr ?? ""))) {
+        return "";
+      }
+      dropped ||= isTransientKubectlFailure(error);
+      throw error;
+    }
+  }, options);
 }
 
 // tests/fixtures/kubernetes/probe.mjs exits with this code, and prints
@@ -326,7 +406,9 @@ export async function assertGatewayModelTurn({ gatewayUrl, gatewayPassword, nonc
     }
   }
   assert.equal(response.status, 200, `real provider-backed model turn failed: ${body}`);
-  assert.match(JSON.parse(body).choices?.[0]?.message?.content ?? "", new RegExp(nonce));
+  const message = JSON.parse(body).choices?.[0]?.message;
+  assert.equal(message?.role, "assistant");
+  assert.match(message?.content ?? "", new RegExp(nonce));
 }
 
 export function createRealKubernetesFixture({

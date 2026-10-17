@@ -1,4 +1,3 @@
-import { spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { get as httpGet } from "node:http";
 import { createServer } from "node:https";
@@ -10,7 +9,7 @@ import { connect } from "node:net";
 // network namespace a runtime wrapper joins, with api.openai.com mapped to
 // loopback, and it also observes the wrapper from outside: when the native
 // process accepts connections, what the private runtime and plugin status
-// report, and what the real readiness program decides. The first-Agent smoke
+// report, and what the runtime's HTTP readiness endpoint decides. The first-Agent smoke
 // (scripts/ci/first-agent-smoke.mjs) runs it without observation on an address
 // the cluster resolves api.openai.com to. Every line it prints is one JSON event
 // with an epoch timestamp.
@@ -24,10 +23,9 @@ const echoPattern =
     ? undefined
     : new RegExp(process.env.PROBE_ENDPOINT_ECHO_PATTERN, "g");
 const observing = process.env.PROBE_OBSERVE_NATIVE_PORT !== undefined;
+const publicReadJourney = process.env.PROBE_PUBLIC_READ_JOURNEY === "1";
 const nativePort = Number(process.env.PROBE_OBSERVE_NATIVE_PORT);
 const statusPort = Number(process.env.PROBE_OBSERVE_STATUS_PORT);
-const readinessEnvironment = JSON.parse(process.env.PROBE_OBSERVE_READINESS_ENV ?? "{}");
-const readinessProgram = observing ? readFileSync("/fixture/readiness.cjs", "utf8") : "";
 // Codex opens the Responses API over a WebSocket first and falls back to HTTPS.
 // Use the WebSocket implementation the runtime image already ships.
 const { WebSocketServer } = createRequire("/app/node_modules/ws/package.json")("ws");
@@ -118,6 +116,64 @@ function answerEvents(model, text) {
   ];
 }
 
+// The smoke's model stand-in requests a real Codex tool call. The command reads
+// the endpoint from the managed skill; the provider-only title is never supplied
+// to the model or the command before the tool output returns.
+function publicReadEvents(model, request) {
+  if (!publicReadJourney) {
+    return undefined;
+  }
+  let input;
+  try {
+    input = JSON.parse(request).input;
+  } catch {
+    return undefined;
+  }
+  if (!Array.isArray(input)) {
+    return undefined;
+  }
+  const output = input.find(
+    (item) => item.type === "function_call_output" && item.call_id === "public-read-call",
+  );
+  if (output) {
+    const result = JSON.stringify(output.output);
+    const title = result.match(/public-pull-[0-9a-f-]{36}/u)?.[0];
+    const curlCode = result.match(/curl: \(([0-9]{1,3})\)/u)?.[1];
+    emit({
+      event: "public-read-tool-result",
+      result: title ? "title-returned" : curlCode ? `curl-${curlCode}` : "no-title",
+    });
+    return answerEvents(model, title ?? "PUBLIC_READ_TOOL_FAILED");
+  }
+  if (!request.includes("OCE_PUBLIC_READ_JOURNEY")) {
+    return undefined;
+  }
+  const command = [
+    "set -eu",
+    'test "$CODEX_NETWORK_PROXY_ACTIVE" = 1',
+    'test "$CODEX_NETWORK_ALLOW_LOCAL_BINDING" = 0',
+    'origin=$(grep -Eo "http://[0-9.]+:8080" /home/node/.openclaw/skills/public-github-read/SKILL.md | head -1)',
+    'curl -q --proxy "$HTTP_PROXY" --noproxy "" --fail-with-body -sS --max-time 15 "$origin/repos/example/public-project/pulls/27"',
+  ].join("\n");
+  const item = {
+    type: "function_call",
+    call_id: "public-read-call",
+    name: "exec_command",
+    arguments: JSON.stringify({ cmd: command }),
+  };
+  const base = {
+    id: "resp_public_read",
+    object: "response",
+    model,
+    created_at: Math.floor(Date.now() / 1000),
+  };
+  return [
+    { type: "response.created", response: { ...base, status: "in_progress", output: [] } },
+    { type: "response.output_item.done", output_index: 0, item },
+    { type: "response.completed", response: { ...base, status: "completed", output: [item] } },
+  ];
+}
+
 // Answer one model turn after the configured delay, unless the caller left.
 function turn(transport, model, request, respond, closed) {
   emit({ event: "request", transport, turn: true });
@@ -129,7 +185,7 @@ function turn(transport, model, request, respond, closed) {
     if (closed()) {
       return;
     }
-    respond(answerEvents(model, text));
+    respond(publicReadEvents(model, request) ?? answerEvents(model, text));
     emit({
       event: "turn-answered",
       transport,
@@ -196,6 +252,12 @@ const server = createServer(
     });
   },
 );
+
+// Whether a caller that sent no request ever reached the provider: each TCP
+// connection, completed TLS handshake and failed handshake.
+server.on("connection", () => emit({ event: "connection" }));
+server.on("secureConnection", () => emit({ event: "secure" }));
+server.on("tlsClientError", (error) => emit({ event: "tls-error", code: error.code ?? null }));
 
 const sockets = new WebSocketServer({ noServer: true });
 server.on("upgrade", (request, socket, head) => {
@@ -298,23 +360,25 @@ function readStatus(path) {
   });
 }
 
-// The real readiness entrypoint, with the wrapper container's environment.
-// Its output is what kubelet shows after "Readiness probe failed:".
 function ready() {
   return new Promise((resolve) => {
-    const child = spawn(process.execPath, ["-e", readinessProgram], {
-      env: { ...process.env, ...readinessEnvironment },
-      stdio: ["ignore", "pipe", "ignore"],
-    });
-    let output = "";
-    child.stdout.setEncoding("utf8");
-    child.stdout.on("data", (chunk) => {
-      output += chunk;
-    });
-    child.once("close", (code) =>
-      resolve({ ready: code === 0, reason: output.trim() === "" ? null : output.trim() }),
+    let settled = false;
+    const settle = (value) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      resolve(value);
+    };
+    const request = httpGet(
+      { host: "127.0.0.1", port: statusPort, path: "/readyz", timeout: 1_000 },
+      (response) => {
+        response.resume();
+        response.once("end", () => settle({ ready: response.statusCode === 200 }));
+      },
     );
-    child.once("error", () => resolve({ ready: false, reason: null }));
+    request.on("error", () => settle({ ready: false }));
+    request.on("timeout", () => request.destroy());
   });
 }
 
@@ -345,7 +409,6 @@ server.listen(443, listenHost, () => {
       observe("runtimeFailure", runtime?.runtimeFailure?.code ?? null);
       observe("plugin", plugin?.phase ?? null);
       observe("ready", readiness.ready);
-      observe("readinessReason", readiness.reason);
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
   })();

@@ -1,16 +1,15 @@
 # Agent plugins
 
-Plugins add selected tools or integrations to an Agent. Each Agent saves its
-own selections separately from its reusable [Configuration](configuration.md).
-Changes apply on the next successful deployment; they do not change another
-Agent or an active revision. New Agents start without user-selected plugins.
+Plugins add tools or integrations to an Agent. Selections belong to that Agent,
+separately from its reusable [Configuration](configuration.md). Changes apply on
+the next successful deployment; other Agents and active revisions stay unchanged.
+New Agents start without user-selected plugins.
 
-Use [Configure Agent plugins](../guides/topics/plugins-configure.md) to select,
-deploy, and check a plugin. Deploying plugins requires the Installation to
-select a bundled [Plugin Driver](drivers/plugin.md); none is selected by
-default. OpenClaw Control Plane (OCC) validates the policy shape and the selected
-Driver's supported controls before saving nonempty selections; startup performs
-the [remaining checks](#failures-and-boundaries).
+[Configure Agent plugins](../guides/topics/plugins-configure.md) explains selection,
+deployment and verification. Deploying requires a bundled [Plugin Driver](drivers/plugin.md);
+none is selected by default. OpenClaw Control Plane (OCC) validates policy shape
+and supported controls before saving nonempty selections. Startup performs the
+[remaining checks](#failures-and-boundaries).
 
 ## Current support
 
@@ -35,7 +34,10 @@ The new policy paths still need
 [real Agent verification](../testing/plugins.md#current-proof-notes). There is
 no bundled Claude PluginDriver.
 
-**Experimental** OAuth discovery needs [login](../guides/deploy/credential-lifecycle.md#use-a-personal-codex-login).
+**Experimental** OAuth discovery uses the saved credential source after
+[device login](../guides/deploy/credential-lifecycle.md#use-a-personal-codex-login).
+The Credential Gateway supplies a usable access token; closing the login session
+does not remove plugin-editing access.
 
 ## Lifecycle
 
@@ -88,9 +90,9 @@ selected.
 
 ## HTTP operations
 
-Plugin selections and default plugin approvers use the existing Agent
-create/update API. There is no separate plugin resource or install, delete,
-policy mutation, or plugin-tool invocation endpoint.
+Plugin selections and default approvers use Agent create/update. There are no
+separate plugin resources or install, delete, policy-mutation or tool-invocation
+endpoints.
 
 | Method and path                                  | Body                                                            | Successful response                     |
 | ------------------------------------------------ | --------------------------------------------------------------- | --------------------------------------- |
@@ -256,8 +258,13 @@ launch; see the
 [compatibility check](../flows/agent-plugin-approvals.md#3-check-the-selected-gateway-before-launch).
 
 The Console resolves display names with the selected same-Namespace bot Secret,
-which stays on the server, and stores IDs. Lookup requires Agent edit and Secret
-`operate` permission; operators can paste user IDs instead. The
+which stays on the server. Selecting a person shows their name and handle immediately;
+the policy stores their workspace-qualified Slack user ID. If the Console cannot resolve
+a saved name, it shows **Name unavailable** and keeps the selection until you remove it.
+During Agent creation, choose a Secret
+beside the approver field; this search-only selection does not bind it to the Agent.
+An existing Slack channel binding supplies the initial selection. Lookup requires
+Agent create or edit and Secret `operate` permission; operators can paste user IDs instead. The
 [Slack Channel Driver](drivers/slack-channel.md) describes workspace display,
 scopes, and pagination.
 
@@ -291,11 +298,15 @@ Codex maps `toolDefaults.reviewer` to the native app-wide reviewer. Native Codex
 has no per-tool reviewer setting, so explicit `tools.<toolId>.reviewer` values
 are rejected rather than applied to the whole app. Unsupported choices fail even if the tool is disabled
 or the value matches an inherited reviewer. Reviewer does not belong in
-`driverPolicy`.
+`driverPolicy`. Agent create, update, provisioning, and deploy answer `400` for an enabled
+`auto` reviewer unless the Agent's Configuration sets
+`plugins.entries.codex.config.appServer.approvalPolicy` to `on-request` or
+`on-failure`.
 
-For explicit Codex reviewers, startup checks effective reviewer settings, session
-approval, and managed model requirements, but not routing after later session or
-model changes. [Native limits](drivers/plugin-bundled.md#native-mappings-and-limits)
+The dedicated Codex app-server starts with the admitted Harness model. For explicit
+Codex reviewers, startup checks that model against managed requirements along with
+effective reviewer settings and session approval. These checks do not cover routing
+after later session or model changes. [Native limits](drivers/plugin-bundled.md#native-mappings-and-limits)
 lists the value mapping and exact checks.
 
 ### Codex-specific policy

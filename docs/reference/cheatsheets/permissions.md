@@ -33,7 +33,7 @@ principal. Rerunning bootstrap does not add missing permissions to existing Role
 | [`preset`](../presets.md)                       | `create`, `read`, `update`, `delete`                                                 | Namespace for create; list needs Namespace `read` and returns only Presets with exact `read`. Exact Preset otherwise.                                                                                                                                                                                                                                      |
 | [`service_account`](../api.md#service-accounts) | `create`, `read`, `update`, `delete`                                                 | Namespace for create; exact ServiceAccount otherwise. Credential creation also uses `update`.                                                                                                                                                                                                                                                              |
 | [`secret`](../api.md#secrets)                   | `create`, `read`, `update`, `delete`, `operate`                                      | Namespace collection for create; list needs Namespace `read` and returns only Secrets with exact `read`. Other actions target the exact Secret. `operate` is checked when a Secret is bound or used.                                                                                                                                                       |
-| [`credential_source`](../credential-sources.md) | `create`, `read`, `update`, `delete`, `operate`                                      | Namespace collection for create; list needs Namespace `read` and returns only sources with exact `read`. Other actions target the exact source. `operate` is checked when a source is bound or deployed. `update` also needs `secret:operate` on each Secret it reads; Roles from an Installation bootstrapped before `update` existed must be granted it. |
+| [`credential_source`](../credential-sources.md) | `create`, `read`, `update`, `delete`, `operate`                                      | Namespace collection for create; list needs Namespace `read` and returns only sources with exact `read`. Other actions target the exact source. `operate` is checked when a source is bound or deployed. `update` also gates rotation and needs `secret:operate` on each Secret it reads; Roles bootstrapped before `update` existed must have it granted. |
 | [`agent`](../api.md#agents)                     | `create`, `read`, `update`, `delete`, `deploy`, `operate`, `administer`, `read_logs` | Namespace for create; exact Agent otherwise. Native admin requires a human session. Bootstrap does not grant `read_logs`.                                                                                                                                                                                                                                  |
 | [`agent_revision`](../api.md#agent-revisions)   | `read`                                                                               | Exact AgentRevision; deployment-status reads use this permission too.                                                                                                                                                                                                                                                                                      |
 
@@ -55,10 +55,11 @@ needs its principal’s own grants; it does not inherit the issuer’s. See
 
 - [Experimental personal Codex login](../../guides/deploy/credential-lifecycle.md#use-a-personal-codex-login)
   requires Namespace `agent:create`, or exact `agent:read` and `agent:update` for
-  an existing Agent. Start also requires `secret:create`; polling, cancellation,
-  and discovery require exact `secret:operate` and the initiating actor. The
-  staged login is an ordinary Secret, so other `secret:operate` holders can bind
-  or project it outside these operations.
+  an existing Agent. Start also requires `secret:create` and
+  `credential_source:create`. Polling and closure require the initiating actor
+  and exact session `secret:operate`; source use requires exact
+  `credential_source:operate`. The session holds only an opaque Gateway handle.
+  Saved-Agent discovery also checks the Agent principal's source grant.
 
 - [Channel directory lookup](../api.md#post-namespacesnamespaceidchanneldirectorylookup)
   requires `agent:create` in the Namespace, or `agent:update` or
@@ -70,9 +71,9 @@ needs its principal’s own grants; it does not inherit the issuer’s. See
   [deploy an Agent](../api.md#post-namespacesnamespaceidagentsagentiddeploy) also
   require `configuration:read`, `service_account:read` for current or new
   associations, `secret:operate` for bound Secrets, and `credential_source:operate`
-  for a bound credential source. At deployment the Agent’s own service principal
-  also needs `secret:operate` on each bound Secret and `credential_source:operate`
-  on its source.
+  for each source in `credentialSources`. At
+  deployment the Agent’s own service principal also needs `secret:operate` on each
+  bound Secret and `credential_source:operate` on each source.
 - [Registering](../api.md#post-namespacesnamespaceidcredentialsources) or
   [updating a credential source](../api.md#patch-namespacesnamespaceidcredentialsourcescredentialsourceid)
   also requires `secret:operate` on each Secret it reads.

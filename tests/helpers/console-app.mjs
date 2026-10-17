@@ -38,16 +38,29 @@ export const backendFixtures = Object.freeze([
 
 function computeDriver({
   repositoryCredentials = false,
+  channelRuntime = false,
   discoverHarnessModels = async () => [],
+  agentProvisioning = false,
+  sandboxDriver,
+  credentialGatewayDriver,
 } = {}) {
   const driver = createTestKubernetesComputeDriver("console-compute", {
     repositoryCredentials,
+    sandboxDriver,
+    credentialGatewayDriver,
+    channelRuntime,
   });
 
   return Object.assign(driver, {
     implementation: "test-memory-lifecycle",
-    // In-memory State has no durable provisioning queue; this fixture supports draft creation.
-    agentProvisioning: undefined,
+    // A channel runtime needs runtime storage, whose Agent runtime credentials this fixture
+    // does not provision unless repository credentials ask for them.
+    ...(channelRuntime && !repositoryCredentials
+      ? { requiresAgentRuntimeCredentials: undefined }
+      : {}),
+    // Most Console cases use drafts. Branch-selection tests can retain the actual
+    // Compute capability while verifying that their flow avoids the durable queue.
+    ...(agentProvisioning ? {} : { agentProvisioning: undefined }),
     // Catalog data is the external Compute boundary; Console/OCC/IAM routes remain real.
     discoverHarnessModels,
     async ensureNamespace(namespace) {
@@ -55,6 +68,10 @@ function computeDriver({
     },
     async deleteNamespace(namespace) {
       return { namespaceId: namespace.id, namespaceDeleted: true };
+    },
+    // The same fixture placement is shared by source management and the Sandbox.
+    async resolveSandboxNamespace(namespace) {
+      return { ...namespace, name: `console-${namespace.id}` };
     },
     async prepareRevision(revision) {
       return {
@@ -66,6 +83,96 @@ function computeDriver({
     },
     async retireRevision() {},
   });
+}
+
+function spkiHash(cert) {
+  return createHash("sha256")
+    .update(new X509Certificate(cert).publicKey.export({ type: "spki", format: "der" }))
+    .digest("base64");
+}
+
+/** The Chromium flag that accepts exactly these leaf certificates (PEM), by public key. */
+export function chromiumTrustArg(certs) {
+  return `--ignore-certificate-errors-spki-list=${certs.map(spkiHash).join(",")}`;
+}
+
+/**
+ * A TLS ingress on 127.0.0.1:`port` that forwards every request to the HTTP listener on
+ * 127.0.0.1:`upstreamPort`, as a production ingress would. `tls` ({ key, cert }, PEM) is the
+ * leaf to serve; without it a one-day self-signed leaf for `originHost` is made with openssl.
+ * Returns the leaf, the Chromium flag that trusts it, and close().
+ */
+export async function startHttpsIngress({
+  port,
+  upstreamPort,
+  originHost = "127.0.0.1",
+  tls,
+  reusePort = false,
+}) {
+  let key = tls?.key;
+  let cert = tls?.cert;
+  if (tls === undefined) {
+    const directory = await mkdtemp(join(tmpdir(), "openclaw-console-tls-"));
+    try {
+      const keyPath = join(directory, "tls.key");
+      const certPath = join(directory, "tls.crt");
+      const generated = spawnSync(
+        "openssl",
+        [
+          "req",
+          "-x509",
+          "-newkey",
+          "rsa:2048",
+          "-nodes",
+          "-days",
+          "1",
+          "-keyout",
+          keyPath,
+          "-out",
+          certPath,
+          "-subj",
+          `/CN=${originHost}`,
+          "-addext",
+          `subjectAltName=DNS:${originHost}`,
+        ],
+        { encoding: "utf8" },
+      );
+      assert.equal(generated.status, 0, generated.stderr || generated.error?.message);
+      key = await readFile(keyPath);
+      cert = await readFile(certPath);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  }
+  const ingress = createHttpsServer({ key, cert }, (incoming, outgoing) => {
+    const upstream = httpRequest(
+      {
+        hostname: "127.0.0.1",
+        port: upstreamPort,
+        method: incoming.method,
+        path: incoming.url,
+        headers: incoming.headers,
+      },
+      (response) => {
+        outgoing.writeHead(response.statusCode, response.headers);
+        response.pipe(outgoing);
+      },
+    );
+    upstream.on("error", () => outgoing.writeHead(502).end());
+    incoming.pipe(upstream);
+  });
+  ingress.listen({ port, host: "127.0.0.1", reusePort });
+  await once(ingress, "listening");
+  return {
+    cert,
+    browserArg: chromiumTrustArg([cert]),
+    async close() {
+      ingress.closeAllConnections();
+      await new Promise((resolve, reject) =>
+        ingress.close((error) => (error ? reject(error) : resolve())),
+      );
+    },
+  };
 }
 
 export async function createConsoleAppFixture(t, options = {}) {
@@ -160,16 +267,33 @@ export async function createConsoleAppFixture(t, options = {}) {
           const namespaces = await view.namespaces.listNamespaces();
           const roles = [];
           const bindings = [];
+          const identities = [];
           for (const namespace of namespaces) {
+            // Browser-created Agents must participate in the same live IAM evaluation
+            // as their browser-created credential grants.
+            for (const agent of await view.agents.listAgents(namespace.id)) {
+              identities.push({
+                id: agent.servicePrincipalId,
+                kind: "service_principal",
+                namespaceId: agent.namespaceId,
+                agentId: agent.id,
+              });
+            }
             roles.push(...(await view.iamPolicy.listRoles(namespace.id)));
             bindings.push(...(await view.iamPolicy.listAccessBindings(namespace.id)));
           }
-          return { roles, bindings };
+          return { roles, bindings, identities };
         };
         const unit = policyUnit.getStore();
         const managed = await (unit ? readPolicy(unit) : platformState.read(readPolicy));
         return {
           ...policy,
+          identities: [
+            ...policy.identities,
+            ...managed.identities.filter(
+              (identity) => !policy.identities.some((existing) => existing.id === identity.id),
+            ),
+          ],
           roles: [...policy.roles, ...managed.roles],
           bindings: [...policy.bindings, ...managed.bindings],
         };
@@ -209,7 +333,11 @@ export async function createConsoleAppFixture(t, options = {}) {
       options.computeDriver ??
       computeDriver({
         repositoryCredentials: options.repositoryCredentials === true,
+        channelRuntime: options.channelRuntime === true,
         discoverHarnessModels: options.discoverHarnessModels,
+        agentProvisioning: options.agentProvisioning,
+        sandboxDriver: options.sandboxDriver,
+        credentialGatewayDriver: options.credentialGatewayDriver,
       }),
     configurationDriver:
       configurationDriver ?? createTestConfigurationDriver({ id: "console-configuration" }),
@@ -306,70 +434,15 @@ export async function createConsoleAppFixture(t, options = {}) {
 
   if (options.https === true) {
     // Exercise browser Secure/Domain cookies through a real TLS ingress to the HTTP API.
-    const directory = await mkdtemp(join(tmpdir(), "openclaw-console-tls-"));
-    cleanupBeforeAppClose.push(() => rm(directory, { recursive: true, force: true }));
-    const keyPath = join(directory, "tls.key");
-    const certPath = join(directory, "tls.crt");
-    const generated = spawnSync(
-      "openssl",
-      [
-        "req",
-        "-x509",
-        "-newkey",
-        "rsa:2048",
-        "-nodes",
-        "-days",
-        "1",
-        "-keyout",
-        keyPath,
-        "-out",
-        certPath,
-        "-subj",
-        `/CN=${originHost}`,
-        "-addext",
-        `subjectAltName=DNS:${originHost}`,
-      ],
-      { encoding: "utf8" },
-    );
-    assert.equal(generated.status, 0, generated.stderr || generated.error?.message);
-    const cert = await readFile(certPath);
-    const ingress = createHttpsServer(
-      { key: await readFile(keyPath), cert },
-      (incoming, outgoing) => {
-        const upstream = httpRequest(
-          {
-            hostname: "127.0.0.1",
-            port,
-            method: incoming.method,
-            path: incoming.url,
-            headers: incoming.headers,
-          },
-          (response) => {
-            outgoing.writeHead(response.statusCode, response.headers);
-            response.pipe(outgoing);
-          },
-        );
-        upstream.on("error", () => outgoing.writeHead(502).end());
-        incoming.pipe(upstream);
-      },
-    );
-    cleanupBeforeAppClose.push(async () => {
-      ingress.closeAllConnections();
-      await new Promise((resolve, reject) =>
-        ingress.close((error) => (error ? reject(error) : resolve())),
-      );
-    });
-    ingress.listen({
+    const ingress = await startHttpsIngress({
       port: browserPort,
-      host: "127.0.0.1",
+      upstreamPort: port,
+      originHost,
       reusePort: browserReservation.reusePort,
     });
-    await once(ingress, "listening");
     await browserReservation.release();
-    const spki = createHash("sha256")
-      .update(new X509Certificate(cert).publicKey.export({ type: "spki", format: "der" }))
-      .digest("base64");
-    browserArgs.push(`--ignore-certificate-errors-spki-list=${spki}`);
+    cleanupBeforeAppClose.push(ingress.close);
+    browserArgs.push(ingress.browserArg);
   }
 
   async function rawRequest(method, path, { headers = {}, body, timeout = 5000 } = {}) {
@@ -537,6 +610,9 @@ export async function createConsoleAppFixture(t, options = {}) {
         configurationId: configuration.id,
         ...(options.backendId === undefined ? {} : { backendId: options.backendId }),
         harnessAuth,
+        ...(options.credentialSources === undefined
+          ? {}
+          : { credentialSources: options.credentialSources }),
         ...(options.executionMode === undefined ? {} : { executionMode: options.executionMode }),
       },
     });

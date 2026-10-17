@@ -1,56 +1,36 @@
-import { element, button } from "../dom.mjs";
+import { button, element, replaceChildrenIfChanged, setText } from "../dom.mjs";
 import { displayDate, namespacePath } from "./list.mjs";
+import { SOURCE_LABELS, podCard, recordRow, visibleText } from "./logs-view.mjs";
 
 const STATUS_POLL_MS = 10_000;
 const FOLLOW_POLL_MS = 2_000;
 const MAX_ROWS = 5_000;
 const TAIL_LINES = 200;
-// A 403 is audited; remember it for this page session instead of re-asking every poll
-// or every time the Logs tab reopens.
+// The longest the Logs view keeps its strip and output back for their first reads.
+const FIRST_VIEW_WAIT_MS = 2_000;
+// A 403 is audited; remember it for this sign-in instead of re-asking every poll or every
+// time the Logs tab reopens. A status denial also keeps whether the caller's permission answer
+// allowed operate when it was last shown (null until an answer is compared): once a later
+// answer allows operate where it did not, the view asks once more. The answer has no read_logs
+// bit, so a log text denial lasts until sign-out.
 const deniedLogViews = new Set();
-const deniedStatusViews = new Set();
+const deniedStatusViews = new Map();
+// Denials are per signed-in operator: another user signing in on this tab asks again.
+const logViewKey = (context, agentId) =>
+  JSON.stringify([context.operatorId ?? null, context.namespaceId, agentId]);
 
-const SOURCE_LABELS = {
-  gateway: "Gateway",
-  agent: "Agent (Harness)",
-  sandbox: "Sandbox (policy decisions)",
-};
+/** Whether this page session already saw the Agent's log text read denied. */
+export function logTextDenied(context, agentId) {
+  return deniedLogViews.has(logViewKey(context, agentId));
+}
+
+/** Forgets every remembered runtime denial: sign-out calls this, so a new sign-in asks again. */
+export function clearRuntimeDenials() {
+  deniedLogViews.clear();
+  deniedStatusViews.clear();
+}
+
 const LEVELS = ["error", "warn", "info", "debug", "unknown"];
-const GAP_LABELS = {
-  stream_replaced: "Container restarted",
-  window_exceeded: "Lines skipped",
-  cursor_expired: "View resumed",
-  truncated: "Page limit reached",
-  buffer_lost: "Sandbox buffer lost lines",
-};
-// What each withheld reason means, followed by the API's reason code as `occ agent logs`
-// prints it. `malformed` is mostly a pretty-printed JSON value split across lines (normal
-// Codex output), so the text never calls it corrupt.
-const WITHHELD_LABELS = {
-  unrecognised_structured: "structured output",
-  oversized: "oversized",
-  malformed: "multi-line, unparseable or deeply nested JSON",
-};
-
-// Agent output is attacker-influenced. A bidirectional override (U+202E) would display the
-// rest of a line reversed, and zero-width or other invisible characters hide text, so every
-// character that is not graphic (the characters `occ agent logs` escapes) shows as an escape.
-const HIDDEN_CHARACTER = /[^\p{L}\p{M}\p{N}\p{P}\p{S}\p{Zs}]/gu;
-
-function visibleText(value) {
-  return String(value).replace(HIDDEN_CHARACTER, (character) => {
-    const code = character.codePointAt(0);
-    return code > 0xffff
-      ? `\\U${code.toString(16).padStart(8, "0")}`
-      : `\\u${code.toString(16).padStart(4, "0")}`;
-  });
-}
-
-function withheldText({ count, reason }) {
-  const label = WITHHELD_LABELS[reason];
-  const lines = count === 1 ? "line" : "lines";
-  return `${count} ${label ? `${label} ${lines}` : lines} withheld (${reason})`;
-}
 
 function runtimeErrorText(error, tier, source) {
   if (error.status === 403) {
@@ -93,177 +73,6 @@ function withRequestId(text, error) {
   return error.requestId ? `${text} Request ID: ${error.requestId}` : text;
 }
 
-function age(timestamp) {
-  const started = Date.parse(timestamp ?? "");
-  if (!Number.isFinite(started)) {
-    return "Unknown age";
-  }
-  const minutes = Math.max(0, Math.round((Date.now() - started) / 60_000));
-  if (minutes < 60) {
-    return `${minutes} min`;
-  }
-  const hours = Math.round(minutes / 60);
-  return hours < 48 ? `${hours} h` : `${Math.round(hours / 24)} d`;
-}
-
-function podCard(pod) {
-  const container = pod.containers.find(({ name }) => name === pod.role) ?? pod.containers[0];
-  const termination = container?.lastTermination;
-  const details = element("dl", { className: "credential-status-list" });
-  const add = (name, value) => details.append(element("dt", {}, name), element("dd", {}, value));
-  add("Phase", pod.phase);
-  add("Ready", pod.ready ? "Yes" : "No");
-  add("Restarts", String(container?.restartCount ?? 0));
-  if (container && container.state !== "running") {
-    add("State", `${container.state}${container.reason ? ` · ${container.reason}` : ""}`);
-  }
-  if (termination) {
-    add(
-      "Last termination",
-      [
-        termination.reason ?? "Unknown reason",
-        termination.exitCode === null ? null : `exit ${termination.exitCode}`,
-        termination.finishedAt ? displayDate(termination.finishedAt) : null,
-      ]
-        .filter(Boolean)
-        .join(" · "),
-    );
-  }
-  add("Age", age(pod.createdAt));
-  const warnings = pod.events.filter(({ type }) => type === "Warning").slice(0, 5);
-  // A Ready Pod whose containers are ready and never restarted has recovered from its
-  // warnings (typically startup readiness probes or a scheduling retry). Show them as
-  // history so a healthy first deploy does not read as a fault.
-  const settled =
-    pod.ready && pod.containers.every(({ ready, restartCount }) => ready && restartCount === 0);
-  return element(
-    "article",
-    { className: "runtime-pod", "aria-label": `${SOURCE_LABELS[pod.role]} Pod ${pod.name}` },
-    element(
-      "h4",
-      {},
-      `${SOURCE_LABELS[pod.role] ?? pod.role}${pod.cluster === "execution" ? " · execution cluster" : ""}`,
-    ),
-    element("p", { className: "muted" }, pod.name),
-    details,
-    warnings.length && settled
-      ? element(
-          "p",
-          { className: "muted runtime-events-note" },
-          "Earlier warnings. The Pod is Ready now and has not restarted.",
-        )
-      : null,
-    warnings.length
-      ? element(
-          "ul",
-          {
-            className: settled ? "runtime-events runtime-events-settled" : "runtime-events",
-            "aria-label": settled ? "Earlier warning Events" : "Recent warning Events",
-          },
-          ...warnings.map((event) =>
-            element(
-              "li",
-              {},
-              visibleText(
-                `${event.container ? `${event.container} · ` : ""}${event.reason}${event.count > 1 ? ` ×${event.count}` : ""}: ${event.message}`,
-              ),
-            ),
-          ),
-        )
-      : null,
-  );
-}
-
-/**
- * Which rule decided a sandbox policy decision (AL3). OpenShell names the rule and its
- * engine on every decision; the policy generation is missing on most paths, so a missing
- * value reads "unknown", never blank. `-` is OpenShell's name for "no rule matched".
- */
-function policyProvenance(fields = {}) {
-  const decision =
-    fields.action !== undefined || fields.rule_name !== undefined || fields.rule_type !== undefined;
-  if (!decision) {
-    return null;
-  }
-  const value = (name) =>
-    fields[name] === undefined || String(fields[name]) === "" ? "unknown" : String(fields[name]);
-  const rule = fields.rule_name === "-" ? "no matching rule" : value("rule_name");
-  return `rule ${rule} · engine ${value("rule_type")} · policy generation ${value("policy_generation")}`;
-}
-
-// OpenShell records no Agent turn, request or session id, so a sandbox decision can only
-// be related to Gateway or Harness lines by time. Never present that as exact (AL6).
-const INFERRED_JOIN_LABEL = "Gateway lines: inferred (time window)";
-const INFERRED_JOIN_TITLE =
-  "OpenShell does not record which Agent turn made this request. Gateway or Harness lines near this time may be related; clocks on different nodes can differ.";
-
-function recordRow(record) {
-  if (record.type === "gap") {
-    return element(
-      "div",
-      { className: "log-row log-row-gap", role: "note" },
-      element(
-        "strong",
-        {},
-        record.reason === "stream_replaced" && record.stream?.source === "sandbox"
-          ? "Sandbox recreated"
-          : (GAP_LABELS[record.reason] ?? record.reason),
-      ),
-      element("span", {}, ` ${record.remedy}`),
-    );
-  }
-  if (record.type === "withheld") {
-    return element(
-      "div",
-      { className: "log-row log-row-withheld", role: "note" },
-      withheldText(record),
-    );
-  }
-  const summary = element(
-    "span",
-    { className: "log-line" },
-    element("span", { className: "log-time" }, record.time ? displayDate(record.time) : "—"),
-    element("span", { className: `log-level log-level-${record.level}` }, record.level),
-    element("span", { className: "log-kind" }, record.kind),
-    record.subsystem
-      ? element("span", { className: "log-subsystem" }, visibleText(record.subsystem))
-      : null,
-    element("span", { className: "log-message" }, visibleText(record.message)),
-    // A failure code is the point of the line; keep it visible without expanding.
-    record.fields?.code === undefined
-      ? null
-      : element("span", { className: "log-code" }, `code=${visibleText(record.fields.code)}`),
-  );
-  const provenance = record.kind === "sandbox" ? policyProvenance(record.fields) : null;
-  if (provenance !== null) {
-    summary.append(
-      element("span", { className: "log-provenance" }, visibleText(provenance)),
-      element("span", { className: "log-join", title: INFERRED_JOIN_TITLE }, INFERRED_JOIN_LABEL),
-    );
-  }
-  let row;
-  if (!record.fields || Object.keys(record.fields).length === 0) {
-    row = element("div", { className: "log-row" }, summary);
-  } else {
-    const fields = element("dl", { className: "log-fields" });
-    for (const [name, value] of Object.entries(record.fields)) {
-      fields.append(element("dt", {}, visibleText(name)), element("dd", {}, visibleText(value)));
-    }
-    row = element("details", { className: "log-row" }, element("summary", {}, summary), fields);
-  }
-  // Filters match only lines; gap and withheld rows always stay visible.
-  row.dataset.level = record.level;
-  row.dataset.search = visibleText(
-    [
-      record.kind,
-      record.subsystem ?? "",
-      record.message,
-      ...Object.entries(record.fields ?? {}).map(([name, value]) => `${name}=${value}`),
-    ].join(" "),
-  ).toLowerCase();
-  return row;
-}
-
 /**
  * Runtime status needs Agent `operate`; log text needs only `read_logs`. Without status
  * the picker offers every source and names no Pod: OCC reads the source's current Pod
@@ -283,31 +92,81 @@ function unobservedDescription() {
   };
 }
 
-function downloadFileName(agentId, revisionId, source, pod) {
-  return `${[agentId, revisionId, source, pod].join("-").replace(/[^A-Za-z0-9_.-]/g, "_")}.log`;
+function downloadFileName(agentId, revisionId, source, pod, previous) {
+  const name = [agentId, revisionId, source, pod].join("-");
+  const suffix = source !== "sandbox" && previous ? "-previous" : "";
+  return `${name.replace(/[^A-Za-z0-9_.-]/g, "_")}${suffix}.log`;
 }
 
 /** Logs tab: runtime status strip, source picker, bounded log pane and follow. */
-export function renderAgentLogs(context, { agent, revisionId }) {
+export function renderAgentLogs(
+  context,
+  {
+    agent,
+    revisionId,
+    shown = Promise.resolve(),
+    // Returns the caller's newest permission answer; `{ fresh: true }` reads it again.
+    permissions = () => Promise.resolve(null),
+    onLogsDenied = () => {},
+  },
+) {
   const base = `${namespacePath(context.namespaceId)}/agents/${encodeURIComponent(agent.id)}/deployments/${encodeURIComponent(revisionId)}/runtime`;
-  // Denials are per signed-in operator: another user signing in on this tab asks again.
-  const deniedKey = JSON.stringify([context.operatorId ?? null, context.namespaceId, agent.id]);
+  const deniedKey = logViewKey(context, agent.id);
   const statusKey = JSON.stringify([
     context.operatorId ?? null,
     context.namespaceId,
     agent.id,
     revisionId,
   ]);
-  const section = element("section", { className: "agent-logs" });
+  // The status strip fills from the first status read and can be taller than a phone screen.
+  // Until that read and the first log page settle (at most FIRST_VIEW_WAIT_MS), the strip and
+  // log viewer stay back, so the view appears in one step instead of the strip pushing the
+  // output down after the page scrolled to it (finding 1413).
+  const section = element("section", { className: "agent-logs agent-logs-pending" });
+  let firstLogRead = null;
+  let markFirstView;
+  const firstView = new Promise((resolve) => {
+    markFirstView = resolve;
+  });
+  function showFirstView() {
+    clearTimeout(firstViewTimer);
+    if (section.classList.contains("agent-logs-pending")) {
+      section.classList.remove("agent-logs-pending");
+      // A hidden pane cannot scroll; open at the newest output as a shown one would. The page
+      // holding the view can still be hidden (an Agent page waits for its overview), so scroll
+      // once it shows. Scrolled to the top, the pane would read as scrolled up and Follow would
+      // stay paused (finding 1536).
+      void shown.then(() => {
+        if (current()) {
+          pane.scrollTop = pane.scrollHeight;
+        }
+      });
+    }
+    markFirstView();
+  }
+  const firstViewTimer = setTimeout(showFirstView, FIRST_VIEW_WAIT_MS);
   const strip = element("div", { className: "runtime-strip", "aria-live": "polite" });
-  const stripStatus = element(
-    "p",
-    { className: "muted", role: "status" },
-    "Loading runtime status…",
-  );
+  // One line: a status region for loading and errors, and the observed time beside it. The
+  // time changes on every 10 s poll, so it sits outside the status region, and aria-live=off
+  // keeps the page view's live region from announcing it; only loading and errors are
+  // announced (finding 1425). The status region stays in the tree, empty when there is
+  // nothing to say, so a later error is announced.
+  const stripStatus = element("span", { role: "status" }, "Loading runtime status…");
+  const stripObserved = element("span", { "aria-live": "off" });
+  const stripLine = element("p", { className: "muted" }, stripStatus, stripObserved);
+  function showStripStatus(text) {
+    setText(stripObserved, "");
+    stripStatus.textContent = text;
+  }
   const sourceSelect = element("select", { id: "runtime-log-source", disabled: true });
   const podSelect = element("select", { id: "runtime-log-pod", hidden: true });
-  const podLabel = element("label", { for: "runtime-log-pod", hidden: true }, "Pod");
+  const podLabel = element("label", { for: "runtime-log-pod", hidden: true }, "Pod / container");
+  const podPicker = element(
+    "div",
+    { className: "log-picker log-pod-picker", hidden: true },
+    podLabel,
+    podSelect,
+  );
   const previous = element("input", {
     type: "checkbox",
     id: "runtime-log-previous",
@@ -322,6 +181,7 @@ export function renderAgentLogs(context, { agent, revisionId }) {
   });
   const followButton = button("Follow", () => setFollow(!following), {
     "aria-pressed": "false",
+    className: "log-follow",
     disabled: true,
   });
   const refreshButton = button("Refresh logs", () => void readLogs({ restart: true }), {
@@ -352,11 +212,11 @@ export function renderAgentLogs(context, { agent, revisionId }) {
     autocomplete: "off",
   });
   filterInput.addEventListener("input", () => applyFilters());
-  const filterStatus = element("p", { className: "hint", role: "status" });
-  const retention = element("p", { className: "hint" });
-  const sourceHint = element("p", { className: "hint", role: "note", hidden: true });
-  const logStatus = element("p", { className: "muted", role: "status" });
-  const logError = element("p", { className: "error", role: "alert", hidden: true });
+  const filterStatus = element("p", { className: "log-filter-status", role: "status" });
+  const retention = element("p", { className: "log-retention" });
+  const sourceHint = element("p", { className: "log-source-hint", role: "note", hidden: true });
+  const logStatus = element("p", { className: "log-output-status", role: "status" });
+  const logError = element("p", { className: "log-error", role: "alert", hidden: true });
   const pane = element("div", {
     className: "log-pane",
     role: "log",
@@ -385,18 +245,37 @@ export function renderAgentLogs(context, { agent, revisionId }) {
   let followTimer;
   let statusTimer;
   let reading = false;
+  // Counts status reads. A newer read supersedes one in flight: its answer, success or
+  // failure, may predate a revocation the newer one sees.
+  let statusRead = 0;
+  // Set once a log read was allowed: a refusal after that is a revocation.
+  let logsAllowed = false;
   // A source, Pod or instance change while a read is in flight restarts the view after it.
   let restartPending = false;
   let rows = 0;
+  // Set when a read is refused after this view showed output; Back rebuilds such a view.
+  let outputRefused = false;
   let logsDenied = deniedLogViews.has(deniedKey);
   // Set when runtime status is denied; the last page's stream stands in for the Pod list.
   let statusDenied = false;
+  // Set once this view compared a status denial with a fresh permission answer, or had no
+  // reason to; Back's check revalidates the page's answer after that.
+  let permissionsAsked = false;
   let lastStream = null;
 
   const current = () => context.isCurrent();
   // Runtime reads are live and audited: a view restored by Back resumes them instead of
   // having the console replay every one of them to revalidate the cached view.
-  const read = (path, options = {}) => context.request(path, { ...options, revalidate: false });
+  // Answers Back's check already read, taken once by the resumed view's first reads.
+  const checked = new Map();
+  const read = (path, options = {}) => {
+    if (checked.has(path)) {
+      const answer = checked.get(path);
+      checked.delete(path);
+      return Promise.resolve(answer);
+    }
+    return context.request(path, { ...options, revalidate: false });
+  };
 
   function selectedSource() {
     return description?.sources.find(({ id }) => id === sourceSelect.value);
@@ -404,7 +283,11 @@ export function renderAgentLogs(context, { agent, revisionId }) {
 
   function selectedPod() {
     const source = selectedSource();
-    return source?.pods.find(({ name }) => name === podSelect.value) ?? source?.pods[0];
+    return (
+      source?.pods.find(
+        ({ name, container }) => JSON.stringify([name, container]) === podSelect.value,
+      ) ?? source?.pods[0]
+    );
   }
 
   // A sandbox source has no Pods: OCC derives the Sandbox from the revision.
@@ -417,6 +300,7 @@ export function renderAgentLogs(context, { agent, revisionId }) {
     const query = new URLSearchParams({ source: source.id });
     if (source.kind !== "sandbox" && pod) {
       query.set("pod", pod.name);
+      query.set("container", pod.container);
     }
     if (previous.checked) {
       query.set("previous", "true");
@@ -432,13 +316,47 @@ export function renderAgentLogs(context, { agent, revisionId }) {
     logError.textContent = text ?? "";
   }
 
+  function showLogReadError(error, source) {
+    if (logsDenied) {
+      return;
+    }
+    showLogError(withRequestId(runtimeErrorText(error, "logs", source.id), error));
+    if (error.status !== 403) {
+      return;
+    }
+    // A refusal from either read clears the displayed output. A page or download already
+    // authorized before that refusal can still arrive; neither may put its output back.
+    logsDenied = true;
+    deniedLogViews.add(deniedKey);
+    outputRefused ||= rows > 0;
+    restartPending = false;
+    cursor = null;
+    pane.replaceChildren();
+    rows = 0;
+    logStatus.textContent = "";
+    applyFilters();
+    setFollow(false);
+    renderPickers();
+    onLogsDenied();
+    // One revoke often removes operate too: ask for status once now, so the Pod cards it showed
+    // do not stay under the log refusal until the next status poll (finding 1597). This read
+    // supersedes one in flight, which may have been authorized before the revoke. A first
+    // read refused revokes nothing.
+    if (logsAllowed && !statusDenied && description !== null) {
+      void loadStatus();
+    }
+  }
+
   function renderStrip() {
     if (!description) {
       return;
     }
-    stripStatus.textContent = `Observed ${displayDate(description.observedAt)}`;
-    strip.replaceChildren(
-      ...(description.pods.length
+    setText(stripStatus, "");
+    setText(stripObserved, `Observed ${displayDate(description.observedAt)}`);
+    // The strip is a live region and status polls every 10 s, so rebuild it only on a change.
+    replaceChildrenIfChanged(
+      strip,
+      description.pods.length
         ? description.pods.map(podCard)
         : [
             element(
@@ -446,14 +364,16 @@ export function renderAgentLogs(context, { agent, revisionId }) {
               { className: "muted" },
               "This version has no running Pod. See Deployment activity.",
             ),
-          ]),
+          ],
     );
   }
 
   function renderPickers() {
     const chosen = sourceSelect.value;
-    sourceSelect.replaceChildren(
-      ...description.sources.map((source) =>
+    // Rebuilding identical options would reset an open picker and re-announce it.
+    replaceChildrenIfChanged(
+      sourceSelect,
+      description.sources.map((source) =>
         element(
           "option",
           { value: source.id, disabled: !source.available },
@@ -467,15 +387,25 @@ export function renderAgentLogs(context, { agent, revisionId }) {
       : (available?.id ?? description.sources[0]?.id ?? "");
     const source = selectedSource();
     const chosenPod = podSelect.value;
-    podSelect.replaceChildren(
-      ...(source?.pods ?? []).map((pod) => element("option", { value: pod.name }, pod.name)),
+    replaceChildrenIfChanged(
+      podSelect,
+      (source?.pods ?? []).map((pod) =>
+        element(
+          "option",
+          { value: JSON.stringify([pod.name, pod.container]) },
+          `${pod.name} / ${pod.container}`,
+        ),
+      ),
     );
     podSelect.hidden = (source?.pods.length ?? 0) <= 1;
     podLabel.hidden = podSelect.hidden;
-    if (source?.pods.some(({ name }) => name === chosenPod)) {
+    podPicker.hidden = podSelect.hidden;
+    if (
+      source?.pods.some(({ name, container }) => JSON.stringify([name, container]) === chosenPod)
+    ) {
       podSelect.value = chosenPod;
     }
-    retention.textContent = source?.retention ?? "";
+    setText(retention, source?.retention ?? "");
     // A dedicated Gateway logs connection errors to a Harness that never came up; its
     // own source holds the cause (for example a failed model probe).
     // Only a revision with a dedicated Harness lists an "agent" source; the hint fires
@@ -489,11 +419,14 @@ export function renderAgentLogs(context, { agent, revisionId }) {
       description.sources.some(({ id }) => id === "agent") &&
       !harnessPods.some(({ ready }) => ready);
     sourceHint.hidden = !harnessDown;
-    sourceHint.textContent = !harnessDown
-      ? ""
-      : harnessPods.length === 0
-        ? "The Agent (Harness) has no Pod yet. Gateway errors that fail to reach it, such as ECONNREFUSED, are a symptom: see Deployment activity for why it has not started."
-        : "The Agent (Harness) Pod is not ready. Gateway errors that fail to reach it, such as ECONNREFUSED, are a symptom: read the Agent (Harness) source for the cause.";
+    setText(
+      sourceHint,
+      !harnessDown
+        ? ""
+        : harnessPods.length === 0
+          ? "The Agent (Harness) has no Pod yet. Gateway errors that fail to reach it, such as ECONNREFUSED, are a symptom: see Deployment activity for why it has not started."
+          : "The Agent (Harness) Pod is not ready. Gateway errors that fail to reach it, such as ECONNREFUSED, are a symptom: read the Agent (Harness) source for the cause.",
+    );
     const pod = selectedPod();
     const restarts = pod
       ? pod.restartCount
@@ -512,16 +445,18 @@ export function renderAgentLogs(context, { agent, revisionId }) {
     followButton.disabled = !readable || previous.checked;
   }
 
-  // Status is denied, but log text has its own grant: offer the log reads anyway.
+  // A later status denial clears the Pod details, not an independently authorized log cursor.
   function offerLogsWithoutStatus() {
-    if (description !== null) {
+    if (statusDenied) {
       return;
     }
+    const first = description === null;
     statusDenied = true;
     description = unobservedDescription();
+    strip.replaceChildren();
     renderPickers();
-    if (!logsDenied) {
-      void readLogs({ restart: true });
+    if (first && !logsDenied) {
+      firstLogRead = readLogs({ restart: true });
     }
   }
 
@@ -530,39 +465,79 @@ export function renderAgentLogs(context, { agent, revisionId }) {
     if (!current()) {
       return;
     }
+    // Taken before any wait, so even a load that reads nothing (hidden page, remembered
+    // refusal) supersedes a read in flight.
+    const ticket = ++statusRead;
+    const superseded = () => ticket !== statusRead;
     if (deniedStatusViews.has(statusKey)) {
-      stripStatus.textContent = runtimeErrorText({ status: 403 }, "status");
-      offerLogsWithoutStatus();
-      return;
+      // A rebuilt view compares the denial with a fresh answer, so an operate grant since
+      // shows on the next visit to Logs (finding 1579). Back's check already compared a
+      // retained view's answer; its resumed loads take the newest one.
+      const fresh = !permissionsAsked;
+      permissionsAsked = true;
+      const operate = (await permissions({ fresh }))?.operate === true;
+      // Another status load may have taken the denial while this one waited.
+      if (!current() || !deniedStatusViews.has(statusKey)) {
+        return;
+      }
+      if (operate && deniedStatusViews.get(statusKey) === false) {
+        // Operate is granted again since the denial: ask once more, never on a timer.
+        deniedStatusViews.delete(statusKey);
+      } else {
+        deniedStatusViews.set(statusKey, operate);
+        showStripStatus(runtimeErrorText({ status: 403 }, "status"));
+        offerLogsWithoutStatus();
+        return;
+      }
     }
     if (!document.hidden) {
       try {
         const first = description === null;
-        description = await read(base);
-        if (!current()) {
+        const answer = await read(base);
+        // A superseded first answer still opens the view, unless a refusal has taken its place.
+        if (!current() || (superseded() && description !== null)) {
           return;
         }
+        description = answer;
+        statusDenied = false;
         renderStrip();
         renderPickers();
         if (first && !logsDenied) {
-          void readLogs({ restart: true });
+          firstLogRead = readLogs({ restart: true });
+        }
+        if (superseded()) {
+          // The newer load schedules the next poll.
+          return;
         }
       } catch (error) {
-        if (!current()) {
+        if (!current() || superseded()) {
           return;
         }
         if (error.status === 401) {
           context.onExpired();
           return;
         }
-        stripStatus.textContent = withRequestId(runtimeErrorText(error, "status"), error);
+        showStripStatus(withRequestId(runtimeErrorText(error, "status"), error));
         if (error.status === 403) {
           offerLogsWithoutStatus();
         }
         // Authorization and support failures do not change on their own.
         if ([403, 404, 501].includes(error.status)) {
           if (error.status === 403) {
-            deniedStatusViews.add(statusKey);
+            deniedStatusViews.set(statusKey, null);
+            // An answer that allows operate may predate a revocation: once per view, compare
+            // the refusal with a fresh one, so a later grant is not taken as unchanged.
+            const fresh = !permissionsAsked;
+            permissionsAsked = true;
+            void permissions()
+              .then((answer) =>
+                answer?.operate === true && fresh ? permissions({ fresh }) : answer,
+              )
+              .then((answer) => {
+                if (deniedStatusViews.get(statusKey) === null) {
+                  deniedStatusViews.set(statusKey, answer?.operate === true);
+                }
+              });
           }
           return;
         }
@@ -617,6 +592,29 @@ export function renderAgentLogs(context, { agent, revisionId }) {
     }
   }
 
+  // A fresh download can name a different Pod, or report that no Pod remains.
+  // Only downloads without production metadata fall back to the loaded page.
+  function downloadPodName(text, source, pod) {
+    if (pod) {
+      return pod.name;
+    }
+    const header = text.slice(0, Math.max(0, text.indexOf("\n")));
+    const served = header.startsWith("# ") ? / pod=(\S+)/.exec(header)?.[1] : undefined;
+    const prefix = `# agent=${agent.id} revision=${revisionId} source=${source.id} `;
+    if (
+      source.kind === "container" &&
+      header.startsWith(prefix) &&
+      / observedAt=\S+ withheld=\d+$/.test(header)
+    ) {
+      return served ?? "no-pod";
+    }
+    return (
+      served ??
+      (statusDenied && lastStream?.source === source.id ? lastStream.pod : null) ??
+      source.id
+    );
+  }
+
   // A download is its own audited read of the last 1000 lines through the session.
   async function download() {
     const source = selectedSource();
@@ -629,7 +627,7 @@ export function renderAgentLogs(context, { agent, revisionId }) {
     downloadButton.disabled = true;
     try {
       const text = await read(`${base}/logs?${query}`, { responseType: "text" });
-      if (!current()) {
+      if (!current() || logsDenied) {
         return;
       }
       if (typeof text !== "string") {
@@ -637,10 +635,17 @@ export function renderAgentLogs(context, { agent, revisionId }) {
         throw new Error("The log download did not return text.");
       }
       showLogError(null);
+      logsAllowed = true;
       const url = URL.createObjectURL(new Blob([text], { type: "text/plain" }));
       const link = element("a", {
         href: url,
-        download: downloadFileName(agent.id, revisionId, source.id, pod?.name ?? source.id),
+        download: downloadFileName(
+          agent.id,
+          revisionId,
+          source.id,
+          downloadPodName(text, source, pod),
+          query.get("previous") === "true",
+        ),
         hidden: true,
       });
       section.append(link);
@@ -655,7 +660,7 @@ export function renderAgentLogs(context, { agent, revisionId }) {
         context.onExpired();
         return;
       }
-      showLogError(withRequestId(runtimeErrorText(error, "logs", source.id), error));
+      showLogReadError(error, source);
     } finally {
       downloadButton.disabled = logsDenied || !readableSelection();
     }
@@ -717,13 +722,15 @@ export function renderAgentLogs(context, { agent, revisionId }) {
     let retryAfter = FOLLOW_POLL_MS;
     try {
       const page = await read(`${base}/logs?${query}`);
-      if (!current() || restartPending) {
+      if (!current() || restartPending || logsDenied) {
         return;
       }
       showLogError(null);
+      logsAllowed = true;
       cursor = page.cursor;
       appendRecords(page.records);
-      if (statusDenied && page.stream) {
+      if (statusDenied) {
+        // A page with no running Pod clears the last Pod, so nothing names it.
         lastStream = page.stream;
         renderPickers();
       }
@@ -741,7 +748,7 @@ export function renderAgentLogs(context, { agent, revisionId }) {
                   : `Showing ${previous.checked ? "the previous instance of " : ""}${page.stream.container} in ${page.stream.pod}.`;
       }
     } catch (error) {
-      if (!current() || (restartPending && error.status !== 401)) {
+      if (!current() || (restartPending && ![401, 403].includes(error.status))) {
         return;
       }
       if (error.status === 401) {
@@ -758,16 +765,10 @@ export function renderAgentLogs(context, { agent, revisionId }) {
       if (restart) {
         logStatus.textContent = "";
       }
-      showLogError(withRequestId(runtimeErrorText(error, "logs", source.id), error));
-      if (error.status === 403) {
-        // Never re-poll after a denial; the view needs new grants.
-        logsDenied = true;
-        deniedLogViews.add(deniedKey);
+      showLogReadError(error, source);
+      if (error.status === 501) {
         setFollow(false);
-        renderPickers();
-      } else if (error.status === 501) {
-        setFollow(false);
-      } else {
+      } else if (!logsDenied) {
         retryAfter = Math.max(FOLLOW_POLL_MS, (error.retryAfterSeconds ?? 10) * 1000);
       }
     } finally {
@@ -804,56 +805,131 @@ export function renderAgentLogs(context, { agent, revisionId }) {
 
   section.append(
     element("h3", {}, "Runtime"),
-    stripStatus,
+    stripLine,
     strip,
-    element("h3", {}, "Logs"),
-    element(
-      "p",
-      { className: "muted" },
-      "Operational output and sandbox policy decisions only: credential-shaped text is masked and structured payloads, prompts and protocol traffic are withheld. Nothing here is stored.",
-    ),
     element(
       "div",
-      { className: "log-toolbar" },
-      element("label", { for: "runtime-log-source" }, "Source"),
-      sourceSelect,
-      podLabel,
-      podSelect,
-      element("label", { className: "checkbox" }, previous, " Previous instance"),
-      element("label", { className: "checkbox" }, includeDebug, " Include debug"),
-      followButton,
-      refreshButton,
-      downloadButton,
+      { className: "log-viewer" },
+      element(
+        "div",
+        { className: "log-viewer-header" },
+        element("h3", {}, "Logs"),
+        element(
+          "p",
+          { className: "log-safety" },
+          "Only operational output and sandbox policy decisions. Credential-shaped text is masked; structured payloads, prompts and protocol traffic are withheld. Nothing here is stored.",
+        ),
+      ),
+      element(
+        "div",
+        { className: "log-controls" },
+        element(
+          "div",
+          { className: "log-toolbar" },
+          element(
+            "div",
+            { className: "log-picker" },
+            element("label", { for: "runtime-log-source" }, "Source"),
+            sourceSelect,
+          ),
+          podPicker,
+          element(
+            "div",
+            { className: "log-options" },
+            element("label", { className: "log-option" }, previous, " Previous instance"),
+            element("label", { className: "log-option" }, includeDebug, " Include debug"),
+          ),
+          element("div", { className: "log-actions" }, followButton, refreshButton, downloadButton),
+        ),
+        element(
+          "div",
+          { className: "log-filters", role: "group", "aria-label": "Log filters" },
+          element(
+            "div",
+            { className: "log-levels" },
+            element("span", { className: "log-filter-label" }, "Levels"),
+            ...levelChips,
+          ),
+          element(
+            "div",
+            { className: "log-search" },
+            element("label", { for: "runtime-log-filter" }, "Filter"),
+            filterInput,
+          ),
+        ),
+        filterStatus,
+      ),
+      sourceHint,
+      logError,
+      logStatus,
+      pane,
+      retention,
     ),
-    element(
-      "div",
-      { className: "log-toolbar", role: "group", "aria-label": "Log filters" },
-      element("span", { className: "muted" }, "Levels"),
-      ...levelChips,
-      element("label", { for: "runtime-log-filter" }, "Filter"),
-      filterInput,
-    ),
-    filterStatus,
-    retention,
-    sourceHint,
-    logStatus,
-    logError,
-    pane,
   );
   if (logsDenied) {
     showLogError(runtimeErrorText({ status: 403 }, "logs"));
   }
+  // Back reuses this view only while what it shows is still readable: the check reads on from
+  // where the view stopped, as its polls would, and a refusal rebuilds the page instead
+  // (finding 1553). The resumed view takes those answers rather than asking again.
+  const logsPath = `${base}/logs?`;
+  const forgetCheck = context.onRevalidate?.(async () => {
+    checked.clear();
+    // A Logs view left for another tab is no longer part of the page.
+    if (!context.view?.contains(section)) {
+      forgetCheck?.();
+      return;
+    }
+    const reads = [];
+    if (description !== null && !statusDenied) {
+      reads.push(base);
+    }
+    if (cursor && !logsDenied && readableSelection()) {
+      const query = logQuery(selectedSource(), selectedPod());
+      query.set("cursor", cursor);
+      reads.push(`${logsPath}${query}`);
+    }
+    // Output that cannot be read on from (no cursor, no readable source, or denied since it
+    // showed) is not shown again from the cache.
+    if ((rows > 0 || outputRefused) && !reads.some((path) => path.startsWith(logsPath))) {
+      throw new Error("The shown output cannot be checked.");
+    }
+    const answers = await Promise.all(
+      reads.map((path) =>
+        context.request(path, { revalidate: false }).catch((error) => {
+          // Each refusal is audited: the rebuilt view takes it as known instead of asking again.
+          if (error.status === 403) {
+            if (path === base) {
+              // Not yet compared with a permission answer: the rebuilt view takes its answer.
+              deniedStatusViews.set(statusKey, null);
+            } else {
+              deniedLogViews.add(deniedKey);
+            }
+          }
+          throw error;
+        }),
+      ),
+    );
+    reads.forEach((path, index) => checked.set(path, answers[index]));
+  });
   // Timers that fired while Back's cache held this view stopped; pick both polls up again.
+  // The page Back's check read is shown, followed or not: it is an audited view (finding 1564).
   context.onResume?.(() => {
     if (current()) {
       pane.scrollTop = paneAtBottom ? pane.scrollHeight : paneScrollTop;
       void loadStatus();
-      if (following) {
+      if ([...checked.keys()].some((path) => path.startsWith(logsPath))) {
+        void readLogs({ restart: false });
+      } else if (following) {
         scheduleFollow(0);
       }
     }
+    checked.clear();
   });
   applyFilters();
-  void loadStatus();
-  return section;
+  void loadStatus()
+    .then(() => firstLogRead)
+    .catch(() => {})
+    .finally(showFirstView);
+  return { section, firstView };
 }
