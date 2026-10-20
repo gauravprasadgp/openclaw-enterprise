@@ -30,6 +30,7 @@ import {
   openAdvancedSettings,
   watchForReload,
 } from "./console-agents-test-support.mjs";
+import { createReadyConsoleNamespace } from "./console-ready-namespace.mjs";
 
 // Saves and reloads on the Agent page's tabs, and every Reload draft, re-navigated to the same
 // URL: the page collapsed to its summary, reread the session, versions, permissions and
@@ -93,35 +94,32 @@ async function plainAgent(t, name, values = nativeValues("before"), options, pre
 // A Slack token binding as the API stores it.
 const envBinding = (secret) => ({ source: secret.ref, delivery: { type: "env" } });
 
-async function slackAgent(t, name) {
-  const fixture = await createConsoleAppFixture(t);
-  await fixture.bootstrap();
-  const namespace = await fixture.createNamespace(name, { ready: true });
-  const app = await fixture.createSecret(namespace.id, `${name} app token`, "xapp-in-place");
-  const bot = await fixture.createSecret(namespace.id, `${name} bot token`, "xoxb-in-place");
-  const agent = await fixture.createAgent(
-    namespace.id,
-    name,
-    nativeValues("channels", {
-      harnessId: "codex",
-      channels: {
-        slack: {
-          enabled: true,
-          mode: "socket",
-          appToken: { source: "env", provider: "default", id: "SLACK_APP_TOKEN" },
-          botToken: { source: "env", provider: "default", id: "SLACK_BOT_TOKEN" },
-          channels: {},
-        },
-      },
-    }),
-    {
-      executionMode: "dedicated",
-      secretBindings: {
-        SLACK_APP_TOKEN: envBinding(app),
-        SLACK_BOT_TOKEN: envBinding(bot),
+// Codex with Slack in socket mode, reading both tokens from env Secret bindings.
+const slackValues = () =>
+  nativeValues("channels", {
+    harnessId: "codex",
+    channels: {
+      slack: {
+        enabled: true,
+        mode: "socket",
+        appToken: { source: "env", provider: "default", id: "SLACK_APP_TOKEN" },
+        botToken: { source: "env", provider: "default", id: "SLACK_BOT_TOKEN" },
+        channels: {},
       },
     },
-  );
+  });
+
+async function slackAgent(t, name) {
+  const { fixture, namespace } = await createReadyConsoleNamespace(t, name);
+  const app = await fixture.createSecret(namespace.id, `${name} app token`, "xapp-in-place");
+  const bot = await fixture.createSecret(namespace.id, `${name} bot token`, "xoxb-in-place");
+  const agent = await fixture.createAgent(namespace.id, name, slackValues(), {
+    executionMode: "dedicated",
+    secretBindings: {
+      SLACK_APP_TOKEN: envBinding(app),
+      SLACK_BOT_TOKEN: envBinding(bot),
+    },
+  });
   return { fixture, namespace, agent, app, bot };
 }
 
@@ -147,7 +145,7 @@ const inPlaceCases = [
     tab: "configuration",
     viewport: { width: 1280, height: 720 },
     async prepare(page) {
-      await page.getByRole("heading", { name: "Create new version" }).waitFor();
+      await page.getByRole("heading", { name: "Prepare this version" }).waitFor();
       await page.waitForFunction(
         () =>
           globalThis.document.querySelector(".agent-draft-actions .primary")?.disabled === false,
@@ -290,9 +288,7 @@ for (const c of inPlaceCases) {
 // the saved Agent, and a second save checks against that saved state instead of the page's
 // first read. Reload authentication source keeps focus too (finding 1446).
 test("saving and reloading the authentication source update the Agent page in place", async (t) => {
-  const fixture = await createConsoleAppFixture(t);
-  await fixture.bootstrap();
-  const namespace = await fixture.createNamespace("Authentication in place", { ready: true });
+  const { fixture, namespace } = await createReadyConsoleNamespace(t, "Authentication in place");
   const first = await fixture.createSecret(namespace.id, "First harness Secret", "hidden-first");
   const second = await fixture.createSecret(namespace.id, "Second harness Secret", "hidden-second");
   const agent = await fixture.createAgent(
@@ -345,11 +341,11 @@ test("saving and reloading the authentication source update the Agent page in pl
   const read = await holdRequests(t, page, agentPath);
   await reload.click();
   await read.requested;
-  await page.getByRole("button", { name: "Configuration", exact: true }).click();
+  await page.getByRole("tab", { name: "Configuration", exact: true }).click();
   await page.getByRole("button", { name: "Edit Configuration" }).waitFor();
   read.release();
   await page.unroute(agentPath);
-  await page.getByRole("button", { name: "Credentials", exact: true }).click();
+  await page.getByRole("tab", { name: "Credentials", exact: true }).click();
   await waitForInputValue(secretField, secretOptionLabel(first));
   await saveAuthentication.waitFor();
   assert.equal(await saveAuthentication.isDisabled(), false);
@@ -362,12 +358,12 @@ test("Refresh sharing, the Configuration editor and the Create Agent shortcuts k
   const preset = JSON.parse(
     await readFile(new URL("../../deploy/presets/default-codex.json", import.meta.url), "utf8"),
   );
-  const fixture = await createConsoleAppFixture(t, { defaultPresets: [preset] });
-  await fixture.bootstrap();
-  const namespace = await fixture.createNamespace("Kept focus", { ready: true });
+  const { fixture, namespace } = await createReadyConsoleNamespace(t, "Kept focus", {
+    defaultPresets: [preset],
+  });
   const agent = await fixture.createAgent(namespace.id, "Kept Focus", nativeValues("focus"));
   const { page } = await newPage(t, fixture, { browser });
-  await login(page, fixture, detailUrl(fixture, namespace.id, agent.id, "draft", "configuration"));
+  await login(page, fixture, detailUrl(fixture, namespace.id, agent.id, "draft", "access"));
   await page.getByRole("heading", { name: "Kept Focus" }).waitFor();
 
   const sharing = page.getByRole("region", { name: "Share Agent", exact: true });
@@ -380,6 +376,7 @@ test("Refresh sharing, the Configuration editor and the Create Agent shortcuts k
 
   // Edit Configuration opens the editor in place of the pressed button; the editor takes
   // focus instead of the document, without scrolling the page to fit it (finding 1620).
+  await page.getByRole("tab", { name: "Configuration", exact: true }).click();
   const edit = page.getByRole("button", { name: "Edit Configuration" });
   await edit.evaluate((node) => node.scrollIntoView({ block: "end" }));
   const editScroll = await page.evaluate(() => globalThis.scrollY);
@@ -477,13 +474,26 @@ test("saving and reloading plugin selections update the Agent page in place", as
   await save.click();
   const reload = page.getByRole("button", { name: "Reload plugin selections" });
   await reload.waitFor();
+  // Save disabled itself, so Reload takes focus, described by why (finding 1998).
+  assert.deepEqual(
+    await reload.evaluate((node) => ({
+      focused: node === globalThis.document.activeElement,
+      description: (node.getAttribute("aria-describedby") ?? "")
+        .split(/\s+/)
+        .map((id) => globalThis.document.getElementById(id)?.textContent),
+    })),
+    {
+      focused: true,
+      description: ["Plugin selections changed. Reload this Agent before saving again."],
+    },
+  );
   await reload.click();
   await page.getByRole("status").filter({ hasText: "Plugin selections reloaded." }).waitFor();
   await place.check();
   assert.deepEqual(JSON.parse(await json.inputValue()), elsewhere);
   assert.equal(await save.isDisabled(), true);
   // The rebuilt editor is clean, so the tabs are free to leave again.
-  assert.equal(await page.getByRole("button", { name: "Channels", exact: true }).isEnabled(), true);
+  assert.equal(await page.getByRole("tab", { name: "Channels", exact: true }).isEnabled(), true);
 });
 
 const repositoryAccess = (defaultProfile) => ({
@@ -568,7 +578,7 @@ test("repository saves, Cancel and Reload draft update the Agent page in place",
     .waitFor();
   assert.equal(await save.isDisabled(), true);
   assert.equal(await cancel.isEnabled(), true);
-  assert.equal(await page.getByRole("button", { name: "Channels", exact: true }).isEnabled(), true);
+  assert.equal(await page.getByRole("tab", { name: "Channels", exact: true }).isEnabled(), true);
   assert.equal(pathRequests(place.requests, "PATCH", agentPath).length, 1);
 });
 
@@ -1033,7 +1043,7 @@ for (const c of declinedCarryCases) {
     await page.getByRole("link", { name: "← Agents", exact: true }).click();
     await page.getByRole("heading", { name: "Agents", exact: true }).waitFor();
     await page.getByRole("link", { name: "Declined Carry", exact: true }).click();
-    await page.getByRole("button", { name: "Channels", exact: true }).click();
+    await page.getByRole("tab", { name: "Channels", exact: true }).click();
     await page.getByRole("button", { name: "Edit Slack", exact: true }).waitFor();
     assert.equal(await page.getByRole("status").filter({ hasText: c.note }).count(), 0);
     assert.equal(await dialog.count(), 0);
@@ -1053,12 +1063,12 @@ const SAVED_STATE_CONFLICT =
 // Deploy would deliver the saved bindings, not the refused choices shown (finding 1640).
 const UNSAVED_SECRETS_GATE =
   "Save the channel Secret choices before deploying, or reload the page to discard unsaved changes.";
-const reservedSaveCases = [
+const configurationSaveCases = [
   {
     name: "Channels",
     tab: "channels",
     genericText: SAVED_STATE_CONFLICT,
-    async act(page) {
+    async act({ page }) {
       await page.getByRole("button", { name: "Edit Slack", exact: true }).click();
       const dialog = page.getByRole("dialog", { name: "Edit Slack" });
       await dialog.getByLabel("Direct-message policy").selectOption("disabled");
@@ -1069,10 +1079,10 @@ const reservedSaveCases = [
     name: "Configuration editor",
     tab: "configuration",
     genericText: SAVED_STATE_CONFLICT,
-    async act(page) {
+    async act({ page, configurationEdit }) {
       await page.getByRole("button", { name: "Edit Configuration" }).click();
       await openAdvancedSettings(page);
-      const values = nativeValues("reserved", { harnessId: "codex" });
+      const values = nativeValues(configurationEdit, { harnessId: "codex" });
       await page.getByLabel("Configuration JSON").fill(JSON.stringify(values, null, 2));
       await page.getByRole("button", { name: "Save Configuration" }).click();
     },
@@ -1081,14 +1091,15 @@ const reservedSaveCases = [
     name: "channel Secrets",
     tab: "credentials",
     genericText: "Credential metadata conflicts with the saved Agent state or selected Secrets.",
-    async act(page, c) {
-      await selectNewSlackSecrets(page, c);
+    staleText: "Configuration changed. Reload this draft before saving channel Secrets.",
+    async act({ page, context }) {
+      await selectNewSlackSecrets(page, context);
       await page.getByRole("button", { name: "Save channel Secrets" }).click();
     },
   },
 ];
 
-for (const [c, generic] of reservedSaveCases.flatMap((c) => [
+for (const [c, generic] of configurationSaveCases.flatMap((c) => [
   [c, false],
   [c, true],
 ])) {
@@ -1125,7 +1136,7 @@ for (const [c, generic] of reservedSaveCases.flatMap((c) => [
     await page.getByRole("heading", { name: `Reserved ${c.name}` }).waitFor();
     await page.getByRole("button", { name: "Deploy new version", disabled: false }).waitFor();
     const requests = apiRequests(page, fixture.origin);
-    await c.act(page, context);
+    await c.act({ page, context, configurationEdit: "reserved" });
     await page
       .getByText(generic ? c.genericText : refusal)
       .first()
@@ -1235,37 +1246,15 @@ test("the unsaved channel Secret gate names a way out for a member who cannot re
 // setup still says what is missing while another token is being changed (#2714 review). Saving
 // the choice alone would not make the draft deployable.
 test("the Deploy gate names a missing Slack binding before an unsaved Secret choice", async (t) => {
-  const fixture = await createConsoleAppFixture(t);
-  await fixture.bootstrap();
-  const namespace = await fixture.createNamespace("Missing and unsaved", { ready: true });
+  const { fixture, namespace } = await createReadyConsoleNamespace(t, "Missing and unsaved");
   const bot = await fixture.createSecret(namespace.id, "Missing and unsaved bot", "xoxb-gate");
   const secondBot = await fixture.createSecret(namespace.id, "Second bot token", "xoxb-gate-2");
   // Slack names both tokens, but only the bot token is bound.
-  const agent = await fixture.createAgent(
-    namespace.id,
-    "Missing and unsaved",
-    nativeValues("channels", {
-      harnessId: "codex",
-      channels: {
-        slack: {
-          enabled: true,
-          mode: "socket",
-          appToken: { source: "env", provider: "default", id: "SLACK_APP_TOKEN" },
-          botToken: { source: "env", provider: "default", id: "SLACK_BOT_TOKEN" },
-          channels: {},
-        },
-      },
-    }),
-    {
-      executionMode: "dedicated",
-      secretBindings: { SLACK_BOT_TOKEN: envBinding(bot) },
-    },
-  );
-  const { page } = await newPage(t, fixture, {
-    browser,
-    context: { viewport: { width: 1280, height: 600 } },
+  const agent = await fixture.createAgent(namespace.id, "Missing and unsaved", slackValues(), {
+    executionMode: "dedicated",
+    secretBindings: { SLACK_BOT_TOKEN: envBinding(bot) },
   });
-  await login(page, fixture, detailUrl(fixture, namespace.id, agent.id, "draft", "credentials"));
+  const page = await openTab(t, fixture, namespace, agent, "credentials");
   await page.getByRole("heading", { name: "Missing and unsaved" }).waitFor();
   const missing = page.getByText(
     /^Complete these in Credentials before deploying: Slack Secret bindings/,
@@ -1516,9 +1505,7 @@ test("carried channel Secret choices survive the page load after a failed reread
 // metadata…" on two lines until the Secret was reread, then collapsed to its name and moved the
 // cards below (CLS 0.073, finding 1482). It now keeps the name it already showed.
 test("a saved Configuration's summary keeps the Secret name while it rereads it", async (t) => {
-  const fixture = await createConsoleAppFixture(t);
-  await fixture.bootstrap();
-  const namespace = await fixture.createNamespace("Summary Name", { ready: true });
+  const { fixture, namespace } = await createReadyConsoleNamespace(t, "Summary Name");
   const model = await fixture.createSecret(namespace.id, "Summary model key", "hidden-model");
   const agent = await fixture.createAgent(namespace.id, "Summary Name", nativeValues("before"), {
     harnessAuth: { method: "api_key", source: model.ref },
@@ -1593,13 +1580,13 @@ test("the other tabs stay locked while a saved channel draft refreshes", async (
   });
   await page.getByRole("heading", { name: "Refresh Lock" }).waitFor();
   await page.getByRole("button", { name: "Deploy new version", disabled: false }).waitFor();
-  const plugins = page.getByRole("button", { name: "Plugins", exact: true });
+  const plugins = page.getByRole("tab", { name: "Plugins", exact: true });
   assert.equal(await plugins.isEnabled(), true);
   await page.getByRole("button", { name: "Disable Slack" }).click();
   await refreshing;
   assert.equal(await plugins.isDisabled(), true);
   assert.equal(
-    await page.getByRole("button", { name: "Credentials", exact: true }).isDisabled(),
+    await page.getByRole("tab", { name: "Credentials", exact: true }).isDisabled(),
     true,
   );
   release();
@@ -1611,9 +1598,7 @@ test("the other tabs stay locked while a saved channel draft refreshes", async (
 // 0.7 s after the click on a live cluster, past the input's 500 ms grace. Stop Agent then
 // moved up into view: CLS 0.074 (finding 1482).
 test("a Configuration save that lands late does not move the cards below the editor", async (t) => {
-  const fixture = await createConsoleAppFixture(t);
-  await fixture.bootstrap();
-  const namespace = await fixture.createNamespace("Late save", { ready: true });
+  const { fixture, namespace } = await createReadyConsoleNamespace(t, "Late save");
   const agent = await fixture.createAgent(namespace.id, "Late Save", nativeValues("before"));
   await fixture.seedActiveAgentRevision(namespace.id, agent.id);
   const page = await openTab(t, fixture, namespace, agent, "configuration", {
@@ -1656,13 +1641,9 @@ test("a Configuration save that lands late does not move the cards below the edi
   assert.equal(await page.getByRole("button", { name: "Edit Configuration" }).isVisible(), true);
 });
 
-// Pressing Save disabled it while it held focus, so focus fell to the body for the whole
-// "Checking Configuration…" wait (finding 1646). The status takes it, as Deploy's does, until
-// Edit Configuration takes it once the save lands.
-test("a keyboard Configuration save keeps focus on its status while the save is checked", async (t) => {
-  const fixture = await createConsoleAppFixture(t);
-  await fixture.bootstrap();
-  const namespace = await fixture.createNamespace("Team", { ready: true });
+// A deployed Agent's Configuration tab with an unsaved edit in the JSON editor.
+async function editedConfiguration(t) {
+  const { fixture, namespace } = await createReadyConsoleNamespace(t, "Team");
   const agent = await fixture.createAgent(namespace.id, "Field Guide", nativeValues("before"));
   await fixture.seedActiveAgentRevision(namespace.id, agent.id);
   const page = await openTab(t, fixture, namespace, agent, "configuration");
@@ -1670,6 +1651,14 @@ test("a keyboard Configuration save keeps focus on its status while the save is 
   await edit.click();
   await openAdvancedSettings(page);
   await page.getByLabel("Configuration JSON").fill(JSON.stringify(nativeValues("after"), null, 2));
+  return { page, namespace, agent, edit };
+}
+
+// Pressing Save disabled it while it held focus, so focus fell to the body for the whole
+// "Checking Configuration…" wait (finding 1646). The status takes it, as Deploy's does, until
+// Edit Configuration takes it once the save lands.
+test("a keyboard Configuration save keeps focus on its status while the save is checked", async (t) => {
+  const { page, namespace, agent } = await editedConfiguration(t);
 
   // The save's reread of the Configuration is held, as on a slow link.
   const reread = await holdRequests(t, page, `**${configurationPath({ namespace, agent })}`, {
@@ -1717,16 +1706,7 @@ test("a keyboard Configuration save keeps focus on its status while the save is 
 // The reader who moved on keeps focus, so no focused control names "Configuration saved.": the
 // status announces itself instead, by taking its text after it is shown (finding 1641).
 test("a late Configuration save leaves focus on the Agents link when the reader moved there", async (t) => {
-  const fixture = await createConsoleAppFixture(t);
-  await fixture.bootstrap();
-  const namespace = await fixture.createNamespace("Team", { ready: true });
-  const agent = await fixture.createAgent(namespace.id, "Field Guide", nativeValues("before"));
-  await fixture.seedActiveAgentRevision(namespace.id, agent.id);
-  const page = await openTab(t, fixture, namespace, agent, "configuration");
-  const edit = page.getByRole("button", { name: "Edit Configuration" });
-  await edit.click();
-  await openAdvancedSettings(page);
-  await page.getByLabel("Configuration JSON").fill(JSON.stringify(nativeValues("after"), null, 2));
+  const { page, namespace, agent, edit } = await editedConfiguration(t);
 
   const saved = await holdRequests(t, page, `**${configurationPath({ namespace, agent })}`, {
     once: true,
@@ -1774,40 +1754,7 @@ test("a late Configuration save leaves focus on the Agents link when the reader 
 // A save from another browser that landed between a save's reread and its PATCH was silently
 // overwritten (finding 1505). The PATCH now names the generation the page read, and the API's
 // 409 leaves Reload draft as the next step, as a conflict found by the reread does.
-const racedSaveCases = [
-  {
-    name: "Channels",
-    tab: "channels",
-    async act(page) {
-      await page.getByRole("button", { name: "Edit Slack", exact: true }).click();
-      const dialog = page.getByRole("dialog", { name: "Edit Slack" });
-      await dialog.getByLabel("Direct-message policy").selectOption("disabled");
-      await dialog.getByRole("button", { name: "Save configuration" }).click();
-    },
-  },
-  {
-    name: "Configuration editor",
-    tab: "configuration",
-    async act(page) {
-      await page.getByRole("button", { name: "Edit Configuration" }).click();
-      await openAdvancedSettings(page);
-      const values = nativeValues("raced", { harnessId: "codex" });
-      await page.getByLabel("Configuration JSON").fill(JSON.stringify(values, null, 2));
-      await page.getByRole("button", { name: "Save Configuration" }).click();
-    },
-  },
-  {
-    name: "channel Secrets",
-    tab: "credentials",
-    message: "Configuration changed. Reload this draft before saving channel Secrets.",
-    async act(page, c) {
-      await selectNewSlackSecrets(page, c);
-      await page.getByRole("button", { name: "Save channel Secrets" }).click();
-    },
-  },
-];
-
-for (const c of racedSaveCases) {
+for (const c of configurationSaveCases) {
   test(`a ${c.name} save raced after its reread is refused and offers Reload draft`, async (t) => {
     const context = await slackAgent(t, `Raced ${c.name}`);
     const { fixture, namespace, agent } = context;
@@ -1828,9 +1775,9 @@ for (const c of racedSaveCases) {
     });
     await page.getByRole("heading", { name: `Raced ${c.name}` }).waitFor();
     await page.getByRole("button", { name: "Deploy new version", disabled: false }).waitFor();
-    await c.act(page, context);
+    await c.act({ page, context, configurationEdit: "raced" });
     const message =
-      c.message ??
+      c.staleText ??
       "The saved Configuration changed while you were editing. Reload this draft before saving.";
     await page.getByText(message).first().waitFor();
     assert.equal(await focusedText(page), "Reload draft");
@@ -1846,3 +1793,170 @@ for (const c of racedSaveCases) {
     await page.getByRole("status").filter({ hasText: "Draft reloaded." }).waitFor();
   });
 }
+
+// Edit current Configuration, low on a version's page, switched to the draft at the top of the
+// page and focused its heading; the editor still needed an Edit Configuration click about
+// 1,500 px below (finding 2061). It now opens the draft with the editor open, in view and focused.
+// The editor came to the very top, with the draft's "New version" notice out of view, so nothing
+// on screen said this was the draft (finding 2086): the notice now sits at the top, above it.
+const draftEditorInView = (page) =>
+  page.waitForFunction(() => {
+    const active = globalThis.document.activeElement;
+    const notice = globalThis.document.querySelector(".version-selection-notice");
+    if (active?.id !== "configuration-json" || !notice?.textContent.startsWith("New version.")) {
+      return false;
+    }
+    const editor = active.getBoundingClientRect();
+    const shown = notice.getBoundingClientRect();
+    return (
+      shown.top >= 0 &&
+      shown.top < 120 &&
+      editor.top > shown.bottom &&
+      editor.top + 80 <= globalThis.innerHeight
+    );
+  });
+
+test("Edit current Configuration opens the draft's Configuration editor in view and focused", async (t) => {
+  const { fixture, namespace } = await createReadyConsoleNamespace(t, "Edit current");
+  const agent = await fixture.createAgent(namespace.id, "Edit Current", nativeValues("current"));
+  const { revision } = await fixture.seedActiveAgentRevision(namespace.id, agent.id);
+  const { page } = await newPage(t, fixture, {
+    browser,
+    context: { viewport: { width: 390, height: 844 } },
+  });
+  await login(
+    page,
+    fixture,
+    detailUrl(fixture, namespace.id, agent.id, revision.id, "configuration"),
+  );
+  const start = page.getByRole("button", { name: "Edit current Configuration" });
+  await start.scrollIntoViewIfNeeded();
+  await start.click();
+  await page.waitForURL(/revision=draft/);
+  const editor = page.getByLabel("Configuration JSON");
+  await editor.waitFor();
+  await draftEditorInView(page);
+  assert.equal(await page.getByRole("button", { name: "Edit Configuration" }).count(), 0);
+
+  // The draft page can show before its Configuration read lands: the editor opens once it does.
+  await page.getByRole("button", { name: "Cancel", exact: true }).click();
+  await page.goto(detailUrl(fixture, namespace.id, agent.id, revision.id, "configuration").href);
+  await start.waitFor();
+  await page.locator('.content [aria-live="polite"][aria-busy="false"]').waitFor();
+  const draftRead = await holdRequests(
+    t,
+    page,
+    `${fixture.origin}/namespaces/${namespace.id}/configurations/${agent.configurationId}`,
+    { method: "GET", once: true },
+  );
+  await start.scrollIntoViewIfNeeded();
+  await start.click();
+  await page.waitForURL(/revision=draft/);
+  await draftRead.requested;
+  await page.waitForFunction(
+    () => globalThis.document.activeElement?.closest(".agent-tabs") !== null,
+  );
+  draftRead.release();
+  await draftEditorInView(page);
+
+  // Unsaved edits keep the draft in its editor: going to v1 and back through Edit current
+  // Configuration brings that editor, with the edits, into view and focus.
+  await editor.fill(`${await editor.inputValue()}\n`);
+  await page.locator('.revision-selector [aria-label$=", current version"]').click();
+  await page.waitForURL((next) => next.searchParams.get("revision") === revision.id);
+  await start.scrollIntoViewIfNeeded();
+  await start.click();
+  await page.waitForURL(/revision=draft/);
+  await draftEditorInView(page);
+  assert.match(await editor.inputValue(), /\n$/);
+});
+
+// A window too short for the notice and the editor's first lines together brings the editor
+// itself to the top (finding 2086).
+test("Edit current Configuration in a short window brings the editor to the top", async (t) => {
+  const { fixture, namespace } = await createReadyConsoleNamespace(t, "Edit short");
+  const agent = await fixture.createAgent(namespace.id, "Edit Short", nativeValues("current"));
+  const { revision } = await fixture.seedActiveAgentRevision(namespace.id, agent.id);
+  const { page } = await newPage(t, fixture, {
+    browser,
+    context: { viewport: { width: 1440, height: 420 } },
+  });
+  await login(
+    page,
+    fixture,
+    detailUrl(fixture, namespace.id, agent.id, revision.id, "configuration"),
+  );
+  const start = page.getByRole("button", { name: "Edit current Configuration" });
+  await start.scrollIntoViewIfNeeded();
+  await start.click();
+  await page.waitForURL(/revision=draft/);
+  await page.waitForFunction(() => {
+    const active = globalThis.document.activeElement;
+    const box = active?.getBoundingClientRect();
+    const notice = globalThis.document.querySelector(".version-selection-notice");
+    // The editor, not the notice, is at the top: the notice is above the window.
+    return (
+      active?.id === "configuration-json" &&
+      box.top >= 0 &&
+      box.top < 120 &&
+      notice?.getBoundingClientRect().bottom <= 0
+    );
+  });
+});
+
+// A draft already shown and kept for a return is restored, not rebuilt, when Edit current
+// Configuration opens it again: that return opens its editor too (finding 2089).
+test("Edit current Configuration opens the editor of a kept draft it returns to", async (t) => {
+  const { fixture, namespace } = await createReadyConsoleNamespace(t, "Edit kept");
+  const agent = await fixture.createAgent(namespace.id, "Edit Kept", nativeValues("current"));
+  const { revision } = await fixture.seedActiveAgentRevision(namespace.id, agent.id);
+  const { page } = await newPage(t, fixture, {
+    browser,
+    context: { viewport: { width: 1440, height: 900 } },
+  });
+  // A settled deployment record and no polls, so each page is kept as it was left.
+  await page.route(
+    `${fixture.origin}/namespaces/${namespace.id}/agents/${agent.id}/deployments/${revision.id}`,
+    (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          data: {
+            deploymentId: revision.id,
+            namespaceId: namespace.id,
+            agentId: agent.id,
+            status: "succeeded",
+            error: null,
+            warnings: [],
+            progress: null,
+          },
+          meta: { requestId: "req_test_edit_kept" },
+        }),
+      }),
+  );
+  await page.clock.install({ time: new Date("2026-10-20T12:00:00Z") });
+  await login(
+    page,
+    fixture,
+    detailUrl(fixture, namespace.id, agent.id, revision.id, "configuration"),
+  );
+  const start = page.getByRole("button", { name: "Edit current Configuration" });
+  await start.scrollIntoViewIfNeeded();
+  await start.click();
+  await page.waitForURL(/revision=draft/);
+  await draftEditorInView(page);
+  // The kept draft is the same node when it comes back.
+  await page.locator(".agent-version-detail").evaluate((node) => {
+    node.dataset.kept = "";
+  });
+  await page.goBack();
+  await page.waitForURL((next) => next.searchParams.get("revision") === revision.id);
+  await page.locator('.content [aria-live="polite"][aria-busy="false"]').waitFor();
+  await page.evaluate(() => globalThis.document.activeElement?.blur());
+  await start.scrollIntoViewIfNeeded();
+  await start.click();
+  await page.waitForURL(/revision=draft/);
+  await draftEditorInView(page);
+  assert.equal(await page.locator(".agent-version-detail[data-kept]").count(), 1);
+});

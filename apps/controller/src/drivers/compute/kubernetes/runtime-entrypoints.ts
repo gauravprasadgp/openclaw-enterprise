@@ -1,3 +1,11 @@
+// A relative import, like the others here: CI image builds and the in-image supervisor proof
+// load this file from a checkout or copy with no workspace packages installed.
+import {
+  RUNTIME_DIAGNOSTIC_CHECKS,
+  RUNTIME_DIAGNOSTIC_CODES,
+  RUNTIME_FAILURE_CHECKS,
+} from "../../../../../../packages/contracts/src/runtime-failure.mjs";
+
 import { PLUGIN_RUNTIME_TRANSLATOR_SOURCE } from "../../plugin/runtime-translator.ts";
 import { nodeProgramArguments } from "../node-program.ts";
 import { gatewayStateMigrationHelper, startupPhaseHelper } from "../runtime-startup.ts";
@@ -107,22 +115,14 @@ function startRuntimeReadinessServer(readiness) {
 `;
 
 // The status path Compute reads a held startup failure from, and the closed
-// vocabulary of codes a runtime may hold. Shared by the Codex Harness and the
+// vocabulary of checks and codes a runtime may report, injected from the contract
+// OCC records them by (finding 1674). Shared by the Codex Harness and the
 // dedicated OpenClaw worker programs.
 const RUNTIME_STATUS_CONSTANTS_HELPER = String.raw`
 const RUNTIME_STATUS_PATH = "/openclaw/runtime/status";
-const RUNTIME_DIAGNOSTIC_CODES = new Set([
-  "LOGIN_FAILED",
-  "MODEL_PROBE_FAILED",
-  "MODEL_PROBE_TIMEOUT",
-  "MODEL_PROBE_CPU_STARVED",
-  "UNAVAILABLE",
-  "NOT_CONFIGURED",
-  "AUTHENTICATION_FAILED",
-  "DISCONNECTED",
-  "INCOMPATIBLE_RESPONSE",
-  "PROBE_FAILED",
-]);
+const RUNTIME_DIAGNOSTIC_CODES = new Set(${JSON.stringify(RUNTIME_DIAGNOSTIC_CODES)});
+const RUNTIME_FAILURE_CHECKS = new Set(${JSON.stringify(RUNTIME_FAILURE_CHECKS)});
+const RUNTIME_DIAGNOSTIC_CHECKS = new Set(${JSON.stringify(RUNTIME_DIAGNOSTIC_CHECKS)});
 `;
 
 // A provider-owned Harness (a Codex app-server or a dedicated OpenClaw worker) gets
@@ -160,7 +160,9 @@ function serveHeldRuntimeFailureToTransportPeer(check, code, cause) {
   ) {
     return;
   }
-  requireNonEmptyString(check, "Runtime failure check");
+  if (!RUNTIME_FAILURE_CHECKS.has(check)) {
+    throw new Error("Runtime failure check is invalid.");
+  }
   if (!RUNTIME_DIAGNOSTIC_CODES.has(code)) {
     throw new Error("Runtime failure code is invalid.");
   }
@@ -379,7 +381,9 @@ function publishPluginRuntimeStatus(report) {
 
 function publishRuntimeFailure(check, code, cause) {
   if (runtimeStatusPort() === undefined) return;
-  requireNonEmptyString(check, "Runtime failure check");
+  if (!RUNTIME_FAILURE_CHECKS.has(check)) {
+    throw new Error("Runtime failure check is invalid.");
+  }
   if (!RUNTIME_DIAGNOSTIC_CODES.has(code)) {
     throw new Error("Runtime failure code is invalid.");
   }
@@ -398,7 +402,9 @@ function publishRuntimeReady() {
 }
 
 function runtimeDiagnosticCheck(check, state, checkedAt, code) {
-  requireNonEmptyString(check, "Runtime diagnostic check");
+  if (!RUNTIME_DIAGNOSTIC_CHECKS.has(check)) {
+    throw new Error("Runtime diagnostic check is invalid.");
+  }
   if (code !== undefined && !RUNTIME_DIAGNOSTIC_CODES.has(code)) {
     throw new Error("Runtime diagnostic code is invalid.");
   }
@@ -2076,13 +2082,33 @@ function probeOpenClawAuthenticationFailure() {
 // answers 401 for a missing scope. A 401 is classified from the provider's error
 // code and a few fixed OpenAI and Anthropic phrases into a closed vocabulary (the
 // body itself is never kept): "missing_api_key" means the request arrived without
-// a credential, which under a Sandbox provider points at the credential proxy
-// rather than the key.
+// a usable credential (OpenAI answers "Missing bearer or basic authentication in
+// header", code null, to an absent, empty, schemeless or duplicated Authorization
+// header), which under a Sandbox provider points at the credential proxy rather
+// than the key. "responseHeaderMarker" reports which response header names were
+// seen, never their values, and never names the provider (the log omits it):
+// "provider-like" (OpenAI's x-request-id plus an openai-* or x-openai-* header, or
+// Anthropic's request-id plus x-should-retry), "openshell-policy" (the
+// X-OpenShell-Policy header the OpenShell supervisor stamps on its own answers,
+// today 403/502), "mixed" (both) or "none". It is an observation, not an origin:
+// the relay forwards an upstream 401 with its headers intact. "bodyShape" names the
+// 401 body's form ("json-error-code", "json-error-no-code": an error object with or
+// without a non-null code, "json-no-error", "non-json" or "empty"; absent if the
+// body could not be read); "providerErrorCode" and
+// "providerErrorType" carry error.code and error.type only when they are in the
+// closed sets below, else "other". The child alone reads the body and writes only
+// those tokens to stdout; the parent keeps a token only if it is in the same sets,
+// so message text, header values and the body never leave the child.
 const UPFRONT_ENDPOINTS = {
   openai: ["https://api.openai.com/v1", { "openai-responses": "/responses", "openai-completions": "/chat/completions" }, (key) => ({ authorization: "Bearer " + key })],
   anthropic: ["https://api.anthropic.com", { "anthropic-messages": "/v1/messages" }, (key) => !key.startsWith("sk-ant-oat") && { "x-api-key": key, "anthropic-version": "2023-06-01" }],
 };
 const UPFRONT_REJECTION_CODES = { 4: "invalid_api_key", 5: "missing_api_key", 6: "insufficient_permissions" };
+const UPFRONT_HEADER_MARKERS = { 0: "none", 10: "provider-like", 20: "openshell-policy", 30: "mixed" };
+const UPFRONT_BODY_SHAPES = ["json-error-code", "json-error-no-code", "json-no-error", "non-json", "empty"];
+const UPFRONT_ERROR_CODES = ["invalid_api_key", "insufficient_permissions", "invalid_organization", "mismatched_organization", "no_organization", "invalid_project", "mismatched_project", "account_deactivated", "deactivated_workspace", "ip_not_authorized"];
+const UPFRONT_ERROR_TYPES = ["invalid_request_error", "authentication_error", "permission_error"];
+const upfrontToken = (name, value, names) => (names.includes(value) ? { [name]: value } : {});
 function credentialRejectedUpfront(provider, fragment, key, stage) {
   fragment ??= {};
   const [base, paths, authorize] = UPFRONT_ENDPOINTS[provider] ?? [];
@@ -2095,15 +2121,23 @@ function credentialRejectedUpfront(provider, fragment, key, stage) {
     (Array.isArray(fragment.models) && fragment.models.some((model) => (model?.api !== undefined && model.api !== api) || model?.baseUrl !== undefined))) return false;
   const path = paths[api];
   stage("preflight");
-  // Exit 3-6 is a 401 (3: unclassified); anything else proves nothing.
-  const status = require("node:child_process").spawnSync(process.execPath, ["-e",
-    'fetch(process.env.U,{method:"POST",headers:JSON.parse(process.env.H),body:"{}",signal:AbortSignal.timeout(8000)}).then(async(r)=>{if(r.status!==401)process.exit(0);let e;try{e=(await r.json())?.error}catch{}const c=e?.code,m=typeof e?.message==="string"?e.message:"";process.exit(c==="invalid_api_key"||/invalid x-api-key/i.test(m)?4:/didn.t provide an api key|no api key provided|x-api-key header is required/i.test(m)?5:c==="insufficient_permissions"||/insufficient permissions|missing scopes/i.test(m)?6:3)},()=>process.exit(0))',
+  // The exit status is a 401's header marker (0, 10, 20 or 30) plus its class (3:
+  // unclassified, 4-6: the codes above); anything else proves nothing.
+  const { status, stdout } = require("node:child_process").spawnSync(process.execPath, ["-e",
+    'fetch(process.env.U,{method:"POST",headers:JSON.parse(process.env.H),body:"{}",signal:AbortSignal.timeout(8000)}).then(async(r)=>{if(r.status!==401)process.exit(0);const n=[...r.headers.keys()],p=(r.headers.has("x-request-id")&&n.some((k)=>/^(x-)?openai-/.test(k)))||(r.headers.has("request-id")&&r.headers.has("x-should-retry")),o=r.headers.has("x-openshell-policy"),s=o?(p?30:20):p?10:0;let t,e,b="";try{t=await r.text()}catch{}if(typeof t==="string")if(!t.trim())b="empty";else try{const j=JSON.parse(t);b="json-no-error";if(j?.error&&typeof j.error==="object"&&!Array.isArray(j.error)){e=j.error;b=e.code==null?"json-error-no-code":"json-error-code"}}catch{b="non-json"}const c=e?.code,m=typeof e?.message==="string"?e.message:"",k=(x,l)=>x==null?"":JSON.parse(l).includes(x)?x:"other";try{require("node:fs").writeSync(1,JSON.stringify([b,k(c,process.env.C),k(e?.type,process.env.T)]))}catch{}process.exit(s+(c==="invalid_api_key"||/invalid x-api-key/i.test(m)?4:/didn.t provide an api key|no api key provided|x-api-key header is required|missing bearer or basic authentication/i.test(m)?5:c==="insufficient_permissions"||/insufficient permissions|missing scopes/i.test(m)?6:3))},()=>process.exit(0))',
   ], {
-    env: { U: base + path, H: JSON.stringify({ ...headers, "content-type": "application/json" }), NODE_EXTRA_CA_CERTS: process.env.NODE_EXTRA_CA_CERTS, SSL_CERT_FILE: process.env.SSL_CERT_FILE },
-    stdio: "ignore", timeout: 10000, killSignal: "SIGKILL",
-  }).status;
-  if (!(status >= 3 && status <= 6)) return false;
-  return { providerStatus: 401, ...(UPFRONT_REJECTION_CODES[status] === undefined ? {} : { providerCode: UPFRONT_REJECTION_CODES[status] }) };
+    env: { U: base + path, H: JSON.stringify({ ...headers, "content-type": "application/json" }), C: JSON.stringify(UPFRONT_ERROR_CODES), T: JSON.stringify(UPFRONT_ERROR_TYPES), NODE_EXTRA_CA_CERTS: process.env.NODE_EXTRA_CA_CERTS, SSL_CERT_FILE: process.env.SSL_CERT_FILE },
+    stdio: ["ignore", "pipe", "ignore"], encoding: "utf8", maxBuffer: 1024, timeout: 10000, killSignal: "SIGKILL",
+  });
+  if (!Number.isInteger(status)) return false;
+  const rejection = status % 10;
+  const marker = UPFRONT_HEADER_MARKERS[status - rejection];
+  if (!(rejection >= 3 && rejection <= 6) || marker === undefined) return false;
+  let tokens;
+  try { tokens = JSON.parse(stdout); } catch {}
+  const [bodyShape, errorCode, errorType] = Array.isArray(tokens) ? tokens : [];
+  return { providerStatus: 401, responseHeaderMarker: marker, ...(UPFRONT_REJECTION_CODES[rejection] === undefined ? {} : { providerCode: UPFRONT_REJECTION_CODES[rejection] }),
+    ...upfrontToken("bodyShape", bodyShape, UPFRONT_BODY_SHAPES), ...upfrontToken("providerErrorCode", errorCode, [...UPFRONT_ERROR_CODES, "other"]), ...upfrontToken("providerErrorType", errorType, [...UPFRONT_ERROR_TYPES, "other"]) };
 }
 
 function runOpenClawAuthenticationProbe(fs, capMs) {
@@ -3245,6 +3279,98 @@ function forwardCodexStderr(stream) {
 }
 `;
 
+// A failed Codex login or startup model check logs the class of Codex's error output
+// (finding 2017), so a sighting can tell a transport failure from a provider answer.
+// The output can carry provider text, URLs and the credential, so only a fixed class
+// from CODEX_FAILURE_OUTPUT_CLASSES leaves this helper. It reads at most the last
+// CODEX_FAILURE_OUTPUT_WINDOW characters and matches them with indexOf and fixed-width
+// digit reads, never a regular expression, so its work stays linear in that window.
+export const CODEX_FAILURE_OUTPUT_CLASS_HELPER = String.raw`
+const CODEX_FAILURE_OUTPUT_WINDOW = 8192;
+const CODEX_TLS_FAILURE_MARKERS = ["certificate", "tls handshake", "handshake failure", "unknown issuer"];
+const CODEX_NETWORK_FAILURE_MARKERS = [
+  "error sending request", "error trying to connect", "tcp connect error", "dns error",
+  "failed to lookup address", "name does not resolve", "name or service not known",
+  "name has no usable address", "temporary failure in name resolution",
+  "connection refused", "connection reset", "connection closed", "connection aborted",
+  "broken pipe", "unexpected eof", "network is unreachable", "host is unreachable",
+  "no route to host", "timed out", "timeout",
+];
+// The HTTP status after a "status" or "http" word: the word starts the text or follows
+// a space, tab, newline, "(" or ":" (so a URL's "?status=500" names none), then up to
+// two ":", "=" or space separators and exactly three digits. Anything else names no status.
+const CODEX_FAILURE_STATUS_WORD_STARTS = " \t\n(:";
+function codexFailureOutputStatus(text, at, start) {
+  if (at > 0 && !CODEX_FAILURE_STATUS_WORD_STARTS.includes(text[at - 1])) return 0;
+  let index = start;
+  while (index < start + 2 && (text[index] === ":" || text[index] === "=" || text[index] === " ")) index++;
+  if (index === start) return 0;
+  let status = 0;
+  for (const end = index + 3; index < end; index++) {
+    const digit = text.charCodeAt(index) - 48;
+    if (!(digit >= 0 && digit <= 9)) return 0;
+    status = status * 10 + digit;
+  }
+  const next = text.charCodeAt(index) - 48;
+  return next >= 0 && next <= 9 ? 0 : status;
+}
+function codexFailureOutputClass(output, error) {
+  const text = typeof output === "string" ? output.slice(-CODEX_FAILURE_OUTPUT_WINDOW).toLowerCase() : "";
+  let rejected = false;
+  let serverError = false;
+  let otherStatus = false;
+  for (const marker of ["status", "http"]) {
+    for (let at = text.indexOf(marker); at !== -1; at = text.indexOf(marker, at + marker.length)) {
+      const status = codexFailureOutputStatus(text, at, at + marker.length);
+      if (status === 401 || status === 403) rejected = true;
+      else if (status >= 500 && status <= 599) serverError = true;
+      else if (status >= 400 && status <= 499) otherStatus = true;
+    }
+  }
+  // A status means the provider (or a proxy) answered, so it outranks transport text.
+  if (rejected) return "http_401_403";
+  if (serverError) return "http_5xx";
+  if (otherStatus) return "http_other";
+  if (CODEX_TLS_FAILURE_MARKERS.some((marker) => text.includes(marker))) return "tls";
+  if (CODEX_NETWORK_FAILURE_MARKERS.some((marker) => text.includes(marker))) return "network";
+  if (error?.code === "ETIMEDOUT") return "timeout";
+  return text.trim() === "" ? "empty" : "unknown";
+}
+// codex exec --json reports a failed turn or a fatal error as a turn.failed or error
+// event on stdout, often with nothing on stderr (finding 2043). The model check passes
+// the events it already parsed; only their message strings are read, newest first, the
+// head of each, until one window is full. Nothing else from stdout is read. Every error
+// event counts, a recovered stream notice too: the class names the output, while the
+// held code and cause name the failure.
+function codexFailureEventText(events) {
+  const parts = [];
+  let length = 0;
+  for (let index = events.length - 1; index >= 0 && length < CODEX_FAILURE_OUTPUT_WINDOW; index--) {
+    const event = events[index];
+    const message = event?.type === "error" ? event.message
+      : event?.type === "turn.failed" ? event.error?.message : undefined;
+    if (typeof message !== "string") continue;
+    const part = message.slice(0, CODEX_FAILURE_OUTPUT_WINDOW - length);
+    parts.push(part);
+    length += part.length + 1;
+  }
+  return parts.reverse().join("\n");
+}
+// The most specific class across the check's stderr and its error events, in the
+// classifier's own precedence: a status, then TLS, network, timeout, other text, none.
+const CODEX_FAILURE_OUTPUT_PRECEDENCE = [
+  "http_401_403", "http_5xx", "http_other", "tls", "network", "timeout", "unknown", "empty",
+];
+function codexProbeFailureClass(stderr, events, error) {
+  const classes = [
+    codexFailureOutputClass(stderr, error),
+    codexFailureOutputClass(Array.isArray(events) ? codexFailureEventText(events) : "", error),
+  ];
+  // Both classes are list members, so the fallback is only defensive.
+  return CODEX_FAILURE_OUTPUT_PRECEDENCE.find((failureClass) => classes.includes(failureClass)) ?? "unknown";
+}
+`;
+
 export const AGENT_RUNTIME_ENTRYPOINT = String.raw`
 const { createHash } = require("node:crypto");
 const { mkdirSync, mkdtempSync, rmSync } = require("node:fs");
@@ -3253,6 +3379,7 @@ const { performance } = require("node:perf_hooks");
 
 ${PLUGIN_RUNTIME_HELPERS}
 ${AUTH_PROBE_FAILURE_HELPER}
+${CODEX_FAILURE_OUTPUT_CLASS_HELPER}
 ${CODEX_STDERR_FILTER_HELPER}
 ${startupPhaseHelper("agent")}
 
@@ -3440,7 +3567,10 @@ if (loginMode === "chatgptAuthTokens") {
     }
   }
 }
-logStartupPhase("codex-login", loginStartedAt, login.status !== 0 || login.error ? "failed" : "ok");
+// A failed native login names the class of its error output, never the output.
+logStartupPhase("codex-login", loginStartedAt, login.status !== 0 || login.error ? "failed" : "ok", undefined,
+  loginMode !== "chatgptAuthTokens" && (login.status !== 0 || login.error)
+    ? codexFailureOutputClass(login.stderr, login.error) : undefined);
 if (login.status !== 0 || login.error) {
   holdFailedAuthentication(
     "login",
@@ -3508,8 +3638,14 @@ function codexProbeStatusFailure(message, detail) {
 
 function probeCodexAuthentication(timeout) {
   let result;
+  // Set once stdout parsed into well-formed events; malformed output classifies stderr only.
+  let parsedEvents;
   const finish = (failure) => ({
     ...(typeof failure === "string" ? { code: failure } : failure),
+    // A failed check that ran names the class of its error output (stderr and its
+    // error events), never the output.
+    ...(failure !== undefined && result !== undefined
+      ? { failureClass: codexProbeFailureClass(result.stderr, parsedEvents, result.error) } : {}),
     exitCode: Number.isInteger(result?.status) ? result.status : null,
     signal: ["SIGKILL", "SIGTERM", "SIGINT"].includes(result?.signal) ? result.signal : null,
   });
@@ -3574,6 +3710,7 @@ function probeCodexAuthentication(timeout) {
       return finish(probeFailure("INVALID_OUTPUT", "json"));
     }
     if (events.some((event) => typeof event?.type !== "string")) return finish(probeFailure("INVALID_OUTPUT", "shape"));
+    parsedEvents = events;
     // A failed turn caused by provider 401/403 is a deterministic credential
     // rejection; timeouts, 5xx, and transport errors keep their existing codes.
     if (events.some((event) => event.type === "turn.failed" && codexAuthenticationRejected(event.error?.message))) {
@@ -3659,6 +3796,7 @@ function startAuthenticatedCodex(attempt = 1, deadline = performance.now() + 610
     cause: result.cause,
     providerStatus: result.providerStatus,
     providerCode: result.providerCode,
+    failureClass: result.failureClass,
   }));
   if (result.code === "MODEL_PROBE_TIMEOUT" && attempt === 1 && performance.now() + 1000 < deadline) {
     setTimeout(() => startAuthenticatedCodex(2, deadline), 1000);

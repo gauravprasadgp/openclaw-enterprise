@@ -24,6 +24,9 @@ import {
   waitForNativeRedeploy,
 } from "../helpers/local-first-agent-native.mjs";
 import { localFirstAgentStack } from "../helpers/local-first-agent-stack.mjs";
+import { GrpcOpenShellGatewayClient } from "../../apps/controller/src/drivers/sandbox/openshell-gateway-client.ts";
+import { availablePort } from "../helpers/available-port.mjs";
+import { stopProcess } from "../helpers/stop-process.mjs";
 
 const repoRoot = fileURLToPath(new URL("../../", import.meta.url));
 const firstAgentScript = fileURLToPath(new URL("../../scripts/first-agent.mjs", import.meta.url));
@@ -484,10 +487,19 @@ test("native terminal failures report only fixed failure codes", async (t) => {
   }
 
   await t.test("name the held failure and its provider response", async () => {
-    const provider = { providerStatus: 401, providerCode: "invalid_api_key" };
+    const provider = {
+      providerStatus: 401,
+      providerCode: "invalid_api_key",
+      responseHeaderMarker: "provider-like",
+      bodyShape: "json-error-code",
+      providerErrorCode: "invalid_api_key",
+      providerErrorType: "invalid_request_error",
+    };
     const records = probeLog({ code: "AUTHENTICATION_FAILED", ...provider });
     // The provider fields reach the assertion's input through the production sanitizer.
-    assert.equal(records[0]?.fields?.providerCode, provider.providerCode);
+    for (const [name, value] of Object.entries(provider)) {
+      assert.equal(records[0]?.fields?.[name], value, name);
+    }
     const observed = await observe(
       handoff,
       handoff,
@@ -519,8 +531,16 @@ test("native terminal failures report only fixed failure codes", async (t) => {
       code: "PRIVATE_SENTINEL",
       providerStatus: 200,
       providerCode: "private-sentinel",
+      responseHeaderMarker: "private-sentinel-source",
+      bodyShape: "private-sentinel-shape",
+      providerErrorCode: "private-sentinel-code",
+      providerErrorType: "private-sentinel-type",
     });
     assert.equal(records[0]?.fields?.providerCode, "private-sentinel");
+    assert.equal(records[0]?.fields?.responseHeaderMarker, "private-sentinel-source");
+    assert.equal(records[0]?.fields?.bodyShape, "private-sentinel-shape");
+    assert.equal(records[0]?.fields?.providerErrorCode, "private-sentinel-code");
+    assert.equal(records[0]?.fields?.providerErrorType, "private-sentinel-type");
     const failed = { ...deployment, error: failure("RUNTIME_MODEL_PROBE_FAILED") };
     const observed = await observe(
       failed,
@@ -535,6 +555,10 @@ test("native terminal failures report only fixed failure codes", async (t) => {
       code: "none",
       providerStatus: "other",
       providerCode: "none",
+      responseHeaderMarker: "absent",
+      bodyShape: "absent",
+      providerErrorCode: "absent",
+      providerErrorType: "absent",
     });
     const single = await observe(
       failed,
@@ -547,6 +571,10 @@ test("native terminal failures report only fixed failure codes", async (t) => {
       code: "other",
       providerStatus: "other",
       providerCode: "other",
+      responseHeaderMarker: "other",
+      bodyShape: "other",
+      providerErrorCode: "other",
+      providerErrorType: "other",
     });
     for (const providerStatus of [399, 401.5, 600]) {
       const statusPage = page(probeLog({ providerStatus }));
@@ -613,6 +641,10 @@ test("native terminal failures report only fixed failure codes", async (t) => {
       code: "none",
       providerStatus: "none",
       providerCode: "none",
+      responseHeaderMarker: "absent",
+      bodyShape: "absent",
+      providerErrorCode: "absent",
+      providerErrorType: "absent",
     });
     for (const other of [
       { ...deployment, deploymentId: "another-revision" },
@@ -700,7 +732,16 @@ test("native terminal failures report only fixed failure codes", async (t) => {
           errorCode: "RUNTIME_MODEL_PROBE_FAILED",
           lastAttemptCode: "none",
         },
-        modelProbe: { probes: 1, code: "MODEL_PROBE_FAILED", ...provider },
+        // The full probe's provider summary names no responder.
+        modelProbe: {
+          probes: 1,
+          code: "MODEL_PROBE_FAILED",
+          ...provider,
+          responseHeaderMarker: "absent",
+          bodyShape: "absent",
+          providerErrorCode: "absent",
+          providerErrorType: "absent",
+        },
       },
     );
     // Codes outside the closed vocabulary print as unrecognized, with no log read.
@@ -713,11 +754,45 @@ test("native terminal failures report only fixed failure codes", async (t) => {
       category: "unrecognized",
       deployment: { status: "failed", errorCode: "unrecognized", lastAttemptCode: "unknown" },
     });
-    // Only the replacement revision's own record and log page are reported.
-    assert.deepEqual(await redeploy([{ ...failed, deploymentId: revisionId }], [replacementPath]), {
-      category: "RUNTIME_AUTHENTICATION_FAILED",
-      deployment: "unavailable",
-    });
+    // A different binding is rejected before status, diagnostics or an agent read.
+    const otherBinding = {
+      namespaceId: `ns_${randomUUID()}`,
+      agentId: `agt_${randomUUID()}`,
+      deploymentId: revisionId,
+    };
+    for (const [field, otherId] of Object.entries(otherBinding)) {
+      for (const status of ["failed", "succeeded", "queued", "running"]) {
+        const mismatched = {
+          ...failed,
+          [field]: otherId,
+          status,
+          error: status === "failed" ? failed.error : null,
+        };
+        const calls = [];
+        await assert.rejects(
+          waitForNativeRedeploy({
+            request: async (method, path) => {
+              calls.push(path);
+              // Even an active replacement cannot legitimize the mismatched record.
+              return calls.length === 1 ? mismatched : { activeRevisionId: replacementId };
+            },
+            namespaceId,
+            agentId,
+            revisionId: replacementId,
+            signal: AbortSignal.timeout(30_000),
+            timeoutMs: 100,
+            pollMs: 1,
+          }),
+          {
+            name: "AssertionError",
+            message: "The native redeploy returned a mismatched deployment binding",
+          },
+          `${field} mismatch in a ${status} deployment must stop the poll`,
+        );
+        assert.deepEqual(calls, [replacementPath]);
+      }
+    }
+    // Only the replacement revision's own log page is reported.
     const firstPage = page(probeLog({ providerStatus: 401 }));
     const stale = await redeploy([failed, firstPage], [replacementPath, replacementLogPath]);
     assert.equal(stale.modelProbe, "unavailable");
@@ -1067,6 +1142,69 @@ test(
         namespaces.items[0].metadata.name,
         "the dedicated Gateway must share the single-cluster tenant namespace",
       );
+      if (recorded.sandboxNetworkPolicies?.some(({ name: rule }) => rule === "python-web")) {
+        // Read the actual provider-created Sandbox after normal Agent deployment:
+        // a rendered Installation alone would not prove delivery to OpenShell.
+        const port = await availablePort();
+        const safeEnvironment = { ...env };
+        delete safeEnvironment.OPENAI_API_KEY;
+        delete safeEnvironment.OPENAI_API_KEY_FILE;
+        const forward = spawn(
+          "kubectl",
+          [
+            "--kubeconfig",
+            join(stateDirectory, "kubeconfig"),
+            "--context",
+            `k3d-${recorded.cluster}`,
+            "port-forward",
+            "--namespace",
+            openShellNamespace,
+            "service/openshell-gateway",
+            `${port}:8080`,
+          ],
+          { env: safeEnvironment, stdio: "ignore" },
+        );
+        context.after(() => stopProcess(forward));
+        const client = new GrpcOpenShellGatewayClient({
+          endpoint: `http://127.0.0.1:${port}`,
+          auth: { mode: "unauthenticated" },
+        });
+        try {
+          const sandboxName = new URL(appServerUrl).hostname.split("--")[1].split(".")[0];
+          const deadline = Date.now() + 30_000;
+          let sandbox;
+          while (Date.now() < deadline && sandbox === undefined) {
+            try {
+              sandbox = await client.getSandbox(
+                { name: sandboxName, workspace: namespaces.items[0].metadata.name },
+                AbortSignal.timeout(2_000),
+              );
+            } catch {
+              // The owned port-forward may still be opening its listener.
+              await new Promise((resolve) => setTimeout(resolve, 100));
+            }
+          }
+          const rule = sandbox?.spec?.policy?.network_policies?.["python-web"];
+          assert.ok(rule, "the startup rule must reach the deployed Agent's actual Sandbox");
+          assert.deepEqual(
+            rule.binaries.map(({ path }) => path),
+            ["/usr/bin/python3.11"],
+          );
+          assert.deepEqual(
+            rule.endpoints.map(({ host, ports }) => ({ host, ports })),
+            [{ host: "example.com", ports: [443] }],
+          );
+          assert.ok(sandbox.spec.policy.network_policies["source-control"]);
+          assert.ok(sandbox.spec.policy.network_policies["workspace-node-enrollment"]);
+        } finally {
+          client.close();
+          await stopProcess(forward);
+        }
+      } else {
+        context.diagnostic(
+          "Existing stack has no python-web startup rule; override delivery was not exercised.",
+        );
+      }
       const services = await readKubernetesJson(
         kube,
         [

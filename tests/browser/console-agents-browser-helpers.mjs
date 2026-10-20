@@ -9,7 +9,10 @@ import { chromium } from "playwright";
 import { watchBrowserContext } from "../helpers/browser-failure-diagnostics.mjs";
 import { keepRequestInterceptionEnabled } from "../helpers/browser-request-interception.mjs";
 import { createHarnessConfiguration } from "../helpers/harness-configuration.mjs";
-import { deploymentErrorForWork } from "../../packages/occ/src/state/controller-work.ts";
+import {
+  deploymentErrorForWork,
+  deploymentProgressForWork,
+} from "../../packages/occ/src/state/controller-work.ts";
 
 // The in-memory fixture has no worker records. A test that supplies a failed deployment
 // record builds its error with the API's own code, so the console shows the exact code,
@@ -139,9 +142,9 @@ export async function login(
   credentials = fixture.credentials,
 ) {
   await page.goto(new URL(path, fixture.origin).href);
-  await page.getByLabel("Username").fill(credentials.email);
+  await page.getByLabel("Email", { exact: true }).fill(credentials.email);
   await page.getByLabel("Password").fill(credentials.password);
-  await page.getByRole("button", { name: "Login" }).click();
+  await page.getByRole("button", { name: "Sign in" }).click();
   await page.waitForURL(/\/console\/(agents|backends|namespaces|settings)/);
 }
 
@@ -477,4 +480,161 @@ export function recordLayoutShifts() {
 export async function takeLayoutShifts(page) {
   const shifts = await page.evaluate(() => globalThis.__layoutShifts.splice(0));
   return { shift: shifts.reduce((sum, entry) => sum + entry.value, 0), shifts };
+}
+
+// The page's main view once its reads have settled and nothing holds it inert.
+export const settledView = '.content [aria-live="polite"][aria-busy="false"]:not([inert])';
+
+// The desktop and phone sizes the console's layout checks sweep.
+export const consoleViewports = Object.freeze([
+  Object.freeze({ width: 1440, height: 900 }),
+  Object.freeze({ width: 390, height: 844 }),
+]);
+
+// The getAgentDeployment response for an admitted revision when the fixture has no worker.
+export function deploymentStatusResponse(
+  { id: deploymentId, namespaceId, agentId, createdAt },
+  { status, error = null, attempt },
+) {
+  const progress =
+    status === "queued" || status === "running"
+      ? deploymentProgressForWork(
+          { state: status === "queued" ? "queued" : "claimed", availableAt: new Date(createdAt) },
+          attempt,
+        )
+      : null;
+  return {
+    json: {
+      data: {
+        deploymentId,
+        namespaceId,
+        agentId,
+        status,
+        cleanup: null,
+        error,
+        warnings: [],
+        progress,
+      },
+      meta: { requestId: "req_00000000-0000-4000-8000-000000000001" },
+    },
+  };
+}
+
+// Answers the browser's read of one deployment with a failed record that carries the API's own
+// error for `code`, so the Agent page shows that version's recovery card.
+export async function routeFailedDeployment(
+  page,
+  fixture,
+  { namespaceId, agentId, deploymentId, code = "DEPENDENCY_UNAVAILABLE" },
+) {
+  const error = persistedDeploymentError(code);
+  const response = deploymentStatusResponse(
+    { id: deploymentId, namespaceId, agentId },
+    { status: "failed", error },
+  );
+  await page.route(
+    `${fixture.origin}/namespaces/${namespaceId}/agents/${agentId}/deployments/${deploymentId}`,
+    (route) => route.fulfill(response),
+  );
+  return error;
+}
+
+// WCAG 2 contrast between two sRGB colours given as [r, g, b] in 0-255.
+function contrastRatio(a, b) {
+  const luminance = (rgb) => {
+    const [r, g, bl] = rgb.map((value) => {
+      const channel = value / 255;
+      return channel <= 0.03928 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4;
+    });
+    return 0.2126 * r + 0.7152 * g + 0.0722 * bl;
+  };
+  const [light, dark] = [luminance(a), luminance(b)].sort((x, y) => y - x);
+  return (light + 0.05) / (dark + 0.05);
+}
+
+// A control's top edge, its own fill and the surface painted behind it: every translucent
+// background up to the first opaque one, composited over it (or over white).
+const controlEdge = (locator) =>
+  locator.evaluate((node) => {
+    const rgba = (value) => {
+      const [r, g, b, a = 1] = value.match(/[\d.]+/g).map(Number);
+      return { rgb: [r, g, b], a };
+    };
+    const layers = [];
+    for (let parent = node.parentElement; parent; parent = parent.parentElement) {
+      const layer = rgba(globalThis.getComputedStyle(parent).backgroundColor);
+      layers.push(layer);
+      if (layer.a === 1) {
+        break;
+      }
+    }
+    let surface = [255, 255, 255];
+    for (const layer of layers.reverse()) {
+      surface = surface.map((value, index) => layer.rgb[index] * layer.a + value * (1 - layer.a));
+    }
+    const style = globalThis.getComputedStyle(node);
+    return {
+      edge: rgba(style.borderTopColor),
+      width: style.borderTopWidth,
+      fill: rgba(style.backgroundColor),
+      surface,
+    };
+  });
+
+// A secondary control on a light surface is marked by its edge alone, so the edge needs 3:1
+// against both its fill (as painted over the surface) and the surface behind it (WCAG 1.4.11).
+// `opaqueFill` also requires the control to paint its own fill.
+export async function assertControlEdge(locator, label, { opaqueFill = false } = {}) {
+  const { edge, width, fill, surface } = await controlEdge(locator);
+  assert.equal(width, "1px", `${label}: edge width`);
+  assert.equal(edge.a, 1, `${label}: the edge is opaque`);
+  if (opaqueFill) {
+    assert.equal(fill.a, 1, `${label}: the fill is opaque`);
+  }
+  const painted = fill.rgb.map((value, index) => value * fill.a + surface[index] * (1 - fill.a));
+  for (const [against, colour] of [
+    ["fill", painted],
+    ["surface", surface],
+  ]) {
+    const ratio = contrastRatio(edge.rgb, colour);
+    assert.ok(
+      ratio >= 3,
+      `${label}: edge ${edge.rgb} is ${ratio.toFixed(2)}:1 against its ${against} ${colour.map(Math.round)}`,
+    );
+  }
+}
+
+// A status line's look and announcement: its class, tone and role, and with `text` its text, all
+// read at one moment (finding 2006).
+export function statusTone(locator, { text = false } = {}) {
+  return locator.evaluate(
+    (node, withText) => ({
+      className: node.className,
+      tone: node.dataset.tone ?? null,
+      role: node.getAttribute("role"),
+      ...(withText ? { text: node.textContent } : {}),
+    }),
+    text,
+  );
+}
+
+// Whether the locator's element holds focus.
+export function hasFocus(locator) {
+  return locator.evaluate((node) => node === globalThis.document.activeElement);
+}
+
+// Counts the browser's `invalid` events. Its own validation fires one per refused control
+// whenever it would show its bubble (a submit without novalidate, or reportValidity); the
+// console's check reads `validity` and fires none. Install it before the page loads; the
+// returned function reads the targets so far.
+export async function countInvalidEvents(page) {
+  await page.addInitScript(() => {
+    globalThis.invalidEvents = [];
+    globalThis.document.addEventListener(
+      "invalid",
+      (event) => globalThis.invalidEvents.push(event.target.id || event.target.tagName),
+      true,
+    );
+  });
+  return () => page.evaluate(() => globalThis.invalidEvents);
 }

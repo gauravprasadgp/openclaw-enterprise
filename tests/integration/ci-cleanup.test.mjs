@@ -69,6 +69,13 @@ async function writeState(path, state) {
   await chmod(path, 0o600);
 }
 
+async function createK3dClusterResource(identity, directory) {
+  const kubeconfig = join(directory, "kubeconfig");
+  await mkdir(directory);
+  await writeFile(kubeconfig, "apiVersion: v1\n", { mode: 0o600 });
+  return { id: "cluster-1", kind: "k3d-cluster", ...identity, directory, kubeconfig };
+}
+
 function runCleanup(statePath, env = {}) {
   return spawnSync(process.execPath, [cleanupPath, "--state", statePath], {
     cwd: repositoryRoot,
@@ -145,13 +152,15 @@ test("k3d routing reset removes only the owned test database", async (t) => {
 
 test("cleanup removes an owned k3d cluster resource through the CLI", async (t) => {
   const root = await fixture(t);
+  const prefix = "openclaw-ci-local-1234567890abcdef";
   const clusterName = "openclaw-k8s-old-truncated-name-abc123def456";
   const k3dLog = join(root, "k3d.log");
   const dockerLog = join(root, "docker.log");
   const clusterDirectory = join(root, `${clusterName}-state`);
-  const kubeconfig = join(clusterDirectory, "kubeconfig");
-  await mkdir(clusterDirectory);
-  await writeFile(kubeconfig, "apiVersion: v1\n", { mode: 0o600 });
+  const cluster = await createK3dClusterResource(
+    { owner: prefix, name: clusterName },
+    clusterDirectory,
+  );
   const deletedMarker = join(root, "deleted");
   await writeExecutable(
     join(root, "bin/k3d"),
@@ -175,20 +184,13 @@ test("cleanup removes an owned k3d cluster resource through the CLI", async (t) 
   await writeState(statePath, {
     version: 1,
     repositoryRoot,
-    prefix: "openclaw-ci-local-1234567890abcdef",
+    prefix,
     resources: [
-      {
-        id: "cluster-1",
-        kind: "k3d-cluster",
-        owner: "openclaw-ci-local-1234567890abcdef",
-        name: clusterName,
-        directory: clusterDirectory,
-        kubeconfig,
-      },
+      cluster,
       {
         id: "image-1",
         kind: "k3d-image",
-        owner: "openclaw-ci-local-1234567890abcdef",
+        owner: prefix,
         name: `${"localhost"}/${clusterName}/occ-test:local`,
         reference:
           "registry.example/gateway@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -230,12 +232,14 @@ for (const scenario of [
 ]) {
   test(`cleanup verifies owned cluster absence: ${scenario}`, async (t) => {
     const root = await fixture(t);
+    const prefix = "openclaw-ci-local-abcdef1234567890";
     const clusterName = "openclaw-k8s-readback-123abc456def";
     const clusterDirectory = join(root, `${clusterName}-state`);
-    const kubeconfig = join(clusterDirectory, "kubeconfig");
     const log = join(root, "k3d.log");
-    await mkdir(clusterDirectory);
-    await writeFile(kubeconfig, "apiVersion: v1\n", { mode: 0o600 });
+    const cluster = await createK3dClusterResource(
+      { owner: prefix, name: clusterName },
+      clusterDirectory,
+    );
     await writeExecutable(
       join(root, "bin/k3d"),
       [
@@ -283,17 +287,8 @@ for (const scenario of [
     const state = {
       version: 1,
       repositoryRoot,
-      prefix: "openclaw-ci-local-abcdef1234567890",
-      resources: [
-        {
-          id: "cluster-1",
-          kind: "k3d-cluster",
-          owner: "openclaw-ci-local-abcdef1234567890",
-          name: clusterName,
-          directory: clusterDirectory,
-          kubeconfig,
-        },
-      ],
+      prefix,
+      resources: [cluster],
     };
     await writeState(statePath, state);
     const result = runCleanup(statePath, {
@@ -436,6 +431,8 @@ for (const stream of ["stdout", "stderr"]) {
 // These are real command trees behind the supported container-binary override. The
 // wrapper and descendant do no container work; the descendant inherits both output
 // pipes and ignores TERM. Its finite lifetime also bounds a failed regression run.
+// Cleanup must leave the escaped descendant running, so the test releases it once it
+// has been observed alive instead of waiting out that lifetime in teardown.
 for (const scenario of [
   "exit-before-timeout",
   "exit-on-term",
@@ -451,6 +448,7 @@ for (const scenario of [
     async (t) => {
       const { root, descendantPidPath, waitForTermination } = await commandTreeFixture(t);
       const heartbeat = join(root, "heartbeat");
+      const release = join(root, "release");
       const descendantPath = join(root, "descendant.cjs");
       await writeFile(
         descendantPath,
@@ -463,7 +461,10 @@ for (const scenario of [
         }
       });
       let ticks = 0;
-      const timer = setInterval(() => fs.writeFileSync(${JSON.stringify(heartbeat)}, String(++ticks)), 50);
+      const timer = setInterval(() => {
+        if (fs.existsSync(${JSON.stringify(release)})) process.exit(0);
+        fs.writeFileSync(${JSON.stringify(heartbeat)}, String(++ticks));
+      }, 50);
       fs.writeFileSync(${JSON.stringify(heartbeat)}, "0");
       process.send("ready");
       process.disconnect();
@@ -569,6 +570,10 @@ for (const scenario of [
           encoding: "utf8",
           timeout: 5000,
         });
+        // Released only after the observation, so a cleanup that waited for the
+        // descendant's pipes still waits out its four-second lifetime and fails the
+        // elapsed-time assertion above.
+        await writeFile(release, "");
         assert.equal(observation.error, undefined, "could not observe escaped descendant");
         assert.equal(observation.status, 0, "escaped descendant stopped during cleanup");
         assert.doesNotMatch(observation.stdout, /^Z/, "escaped descendant stopped during cleanup");
@@ -583,12 +588,14 @@ for (const scenario of [
 
 test("cleanup rejects a k3d cluster directory outside the owned cluster prefix", async (t) => {
   const root = await fixture(t);
+  const prefix = "openclaw-ci-local-abcdef1234567890";
   const clusterName = "openclaw-k8s-owned-cluster-abcdef123456";
   const clusterDirectory = join(root, "foreign-directory");
-  const kubeconfig = join(clusterDirectory, "kubeconfig");
   const k3dLog = join(root, "k3d.log");
-  await mkdir(clusterDirectory);
-  await writeFile(kubeconfig, "apiVersion: v1\n", { mode: 0o600 });
+  const cluster = await createK3dClusterResource(
+    { owner: prefix, name: clusterName },
+    clusterDirectory,
+  );
   await writeExecutable(
     join(root, "bin/k3d"),
     ["#!/bin/sh", `printf '%s\\n' "$*" >> ${JSON.stringify(k3dLog)}`, "exit 0", ""].join("\n"),
@@ -598,17 +605,8 @@ test("cleanup rejects a k3d cluster directory outside the owned cluster prefix",
   const state = {
     version: 1,
     repositoryRoot,
-    prefix: "openclaw-ci-local-abcdef1234567890",
-    resources: [
-      {
-        id: "cluster-1",
-        kind: "k3d-cluster",
-        owner: "openclaw-ci-local-abcdef1234567890",
-        name: clusterName,
-        directory: clusterDirectory,
-        kubeconfig,
-      },
-    ],
+    prefix,
+    resources: [cluster],
   };
   await writeState(statePath, state);
 
@@ -627,10 +625,8 @@ test("cleanup rejects ownerless resources before invoking cleanup commands", asy
   const root = await fixture(t);
   const clusterName = "openclaw-k8s-ownerless-cluster-abcdef123456";
   const clusterDirectory = join(root, `${clusterName}-state`);
-  const kubeconfig = join(clusterDirectory, "kubeconfig");
   const k3dLog = join(root, "k3d.log");
-  await mkdir(clusterDirectory);
-  await writeFile(kubeconfig, "apiVersion: v1\n", { mode: 0o600 });
+  const cluster = await createK3dClusterResource({ name: clusterName }, clusterDirectory);
   await writeExecutable(
     join(root, "bin/k3d"),
     ["#!/bin/sh", `printf '%s\\n' "$*" >> ${JSON.stringify(k3dLog)}`, "exit 0", ""].join("\n"),
@@ -641,15 +637,7 @@ test("cleanup rejects ownerless resources before invoking cleanup commands", asy
     version: 1,
     repositoryRoot,
     prefix: "openclaw-ci-local-abcdef1234567890",
-    resources: [
-      {
-        id: "cluster-1",
-        kind: "k3d-cluster",
-        name: clusterName,
-        directory: clusterDirectory,
-        kubeconfig,
-      },
-    ],
+    resources: [cluster],
   };
   await writeState(statePath, state);
 

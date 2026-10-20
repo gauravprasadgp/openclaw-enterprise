@@ -1,3 +1,18 @@
+import { openShellLogDecision } from "./openshell-log-decisions.ts";
+import {
+  AGENT_POLICY_PREFIX,
+  openShellAgentNetworkRules,
+  openShellPolicyCandidate,
+  sameOpenShellPolicy,
+} from "./openshell-policy.ts";
+import { immutableCopy } from "@openclaw-enterprise/utils";
+import type {
+  SandboxNetworkGrant,
+  SandboxPolicySnapshot,
+  SandboxPolicyObservation,
+  SandboxPolicyRecommendations,
+  SandboxPolicyRecommendation,
+} from "@openclaw-enterprise/contracts";
 import { asRecord, isNonEmptyString, sha256Hex } from "@openclaw-enterprise/utils";
 import {
   KubernetesObjectApi,
@@ -13,6 +28,7 @@ import {
   RuntimeLogsSandboxNotFoundError,
   SandboxNamespaceRefusedError,
   SandboxRevisionUnsupportedError,
+  SandboxWorkspaceSetupRefusedError,
   TransientDependencyError,
 } from "@openclaw-enterprise/occ";
 import { setTimeout as delay } from "node:timers/promises";
@@ -31,6 +47,7 @@ import type {
   SandboxHarnessObservation,
   SandboxHarnessStatus,
   SandboxHarnessStatusContext,
+  SandboxHarnessWithdrawalContext,
   SandboxLogChunk,
   SandboxLogContext,
   SandboxLogRequest,
@@ -44,6 +61,8 @@ import {
   type OpenShellGateway,
 } from "../../backends/openshell.ts";
 import {
+  confirmSandboxAbsent,
+  gatewayIdentityRefusal,
   openShellSandboxLogReader,
   openShellSandboxObserver,
   type OpenShellGatewayClient,
@@ -65,6 +84,7 @@ import { harnessWorkspacePreparationScript } from "../compute/kubernetes/index.t
 import { nodeProgramArguments } from "../compute/node-program.ts";
 import {
   requireWorkspaceSetupConfiguration,
+  WORKSPACE_SETUP_REFUSED_EXIT_STATUS,
   WORKSPACE_SETUP_RUNTIME,
 } from "../compute/workspace-setup-runtime.ts";
 
@@ -1258,11 +1278,13 @@ const WORKSPACE_SETUP_WAIT = String.raw`{
 // Remote execution can outlive a lost RPC response. Keep the lock across the
 // initializer process so a retry cannot race its writes; kernel locks also release
 // after a crash. Private document bytes travel only through stdin, never argv.
+// The runner's refusal status passes through; any other failure exits 1 (finding 1708).
 const WORKSPACE_SETUP_EXEC = String.raw`
 const fs = require("node:fs");
 const path = require("node:path");
 const { spawnSync } = require("node:child_process");
 let lock;
+let refused = false;
 try {
   const workspace = process.env.OPENCLAW_WORKSPACE_DIR;
   if (!workspace || !path.isAbsolute(workspace)) throw new Error();
@@ -1278,9 +1300,10 @@ try {
     env: { ...process.env, OPENCLAW_WORKSPACE_SETUP_PATH: undefined },
     stdio: ["pipe", "ignore", "ignore", lock], timeout: 250000,
   });
+  refused = !result.error && result.status === ${WORKSPACE_SETUP_REFUSED_EXIT_STATUS};
   if (result.error || result.status !== 0) throw new Error();
 } catch {
-  process.exitCode = 1;
+  process.exitCode = refused ? ${WORKSPACE_SETUP_REFUSED_EXIT_STATUS} : 1;
 } finally {
   if (lock !== undefined) fs.closeSync(lock);
 }
@@ -1965,7 +1988,8 @@ function sandboxSpec(
         run_as_group: options.policy.process.runAsGroup,
       },
       network_policies: {
-        ...networkPolicies(options),
+        ...(revision.sandboxPolicy?.defaults ?? networkPolicies(options)),
+        ...openShellAgentNetworkRules(revision.sandboxPolicy?.additions ?? []),
         ...(runtimeProvider === undefined || workspaceNodeBinding === undefined
           ? {}
           : workspaceNodeNetworkPolicy(workspaceNodeBinding)),
@@ -2126,7 +2150,47 @@ export const configurationSchema = Object.freeze({
   properties: {
     gateway: { type: "object" },
     kubernetes: { type: "object" },
-    policy: { type: "object" },
+    policy: {
+      type: "object",
+      properties: {
+        networkPolicies: {
+          type: "array",
+          items: {
+            type: "object",
+            additionalProperties: false,
+            required: ["name", "binaries", "endpoints"],
+            properties: {
+              name: { type: "string" },
+              binaries: {
+                type: "array",
+                items: {
+                  type: "object",
+                  additionalProperties: false,
+                  required: ["path"],
+                  properties: { path: { type: "string" } },
+                },
+              },
+              endpoints: {
+                type: "array",
+                items: {
+                  type: "object",
+                  additionalProperties: false,
+                  required: ["host", "ports"],
+                  properties: {
+                    host: { type: "string" },
+                    ports: { type: "array", items: { type: "integer" } },
+                    protocol: { type: "string" },
+                    tls: { type: "string" },
+                    enforcement: { type: "string" },
+                    access: { type: "string" },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    },
     sandboxNamePrefix: { type: "string" },
     startupDelayMs: { type: "integer", minimum: 1, maximum: MAX_SANDBOX_STARTUP_DELAY_MS },
     logLevel: { type: "string" },
@@ -2399,6 +2463,7 @@ export class OpenShellSandboxDriver implements SandboxDriver {
   readonly facets = Object.freeze(["networking", "filesystem", "process"] as const);
   // environment() sets HOME to this for every Sandbox it creates.
   readonly harnessHome = OPENSHELL_HOME;
+  readonly networkPolicy = Object.freeze({ wildcards: true, portRanges: true, live: true });
   private readonly options: OpenShellSandboxDriverOptions;
   private readonly backend: Backend<OpenShellGateway>;
 
@@ -2650,7 +2715,15 @@ export class OpenShellSandboxDriver implements SandboxDriver {
     // Every reconcile pass reaches here. Re-sending CreateSandbox for a Sandbox that
     // exists would hit the gateway's request_id replay, which refuses a changed spec
     // (REQUEST_ID_PAYLOAD_MISMATCH) and forgets the create after 24 h (ALREADY_EXISTS).
-    let existing = await client.getSandbox(selector, context.signal);
+    // GetSandbox also answers NOT_FOUND for a Sandbox this identity may not see (finding
+    // 1676). That is safe here without a Workspace read: nothing is recorded as gone, and
+    // CreateSandbox keeps PERMISSION_DENIED for a non-member, so a hidden Sandbox is neither
+    // adopted nor created over; the create fails with SANDBOX_GATEWAY_UNAUTHORIZED below.
+    const refused = gatewayIdentityRefusal(
+      workspace,
+      `Sandbox ${sandbox.resourceName} cannot be created or adopted`,
+    );
+    let existing = await refused(() => client.getSandbox(selector, context.signal));
     if (!codex && existing === undefined) {
       await prepareNativeWorkspace(context, this.options, sandbox);
     }
@@ -2673,9 +2746,8 @@ export class OpenShellSandboxDriver implements SandboxDriver {
       let created;
       let alreadyExists = false;
       try {
-        created = await client.createSandbox(
-          { ...create, requestId: requestIds[attempt]! },
-          context.signal,
+        created = await refused(() =>
+          client.createSandbox({ ...create, requestId: requestIds[attempt]! }, context.signal),
         );
       } catch (error) {
         if (error instanceof OpenShellRequestReplayRefusedError) {
@@ -2718,7 +2790,7 @@ export class OpenShellSandboxDriver implements SandboxDriver {
         await this.initializeWorkspace(context, sandbox, client);
         return Object.freeze(sandbox);
       }
-      existing = await client.getSandbox(selector, context.signal);
+      existing = await refused(() => client.getSandbox(selector, context.signal));
       if (existing === undefined && alreadyExists) {
         throw new OpenShellSandboxConfigurationFailure(
           `OpenShell Sandbox ${sandbox.resourceName} disappeared during creation.`,
@@ -2768,7 +2840,7 @@ export class OpenShellSandboxDriver implements SandboxDriver {
    * exposure would otherwise hand agent-run code an inbound channel for the Sandbox's lifetime
    * (finding 1657). Fails closed: resolves only once OpenShell confirms the service gone.
    */
-  async withdrawHarnessExposure(context: SandboxHarnessContext): Promise<void> {
+  async withdrawHarnessExposure(context: SandboxHarnessWithdrawalContext): Promise<void> {
     this.requireOperatorWorkspaceMode("withdraw a Harness exposure");
     if (
       context.revision.harness.mode !== "dedicated" ||
@@ -2799,12 +2871,32 @@ export class OpenShellSandboxDriver implements SandboxDriver {
     sandbox: string,
     signal: AbortSignal,
   ): Promise<void> {
+    // A refusal from any of the three calls is the same lost or expired identity: the
+    // deployment fails with that code instead of spending its attempts on a generic failure.
+    const unconfirmed = `the Harness exposure of Sandbox ${sandbox} cannot be confirmed withdrawn`;
+    const refused = gatewayIdentityRefusal(workspace, unconfirmed);
     // Read first: after the first withdrawal every reconcile pass passes here, and a
     // DeleteService per pass would be a gateway mutation per pass for nothing.
-    if ((await client.getService(workspace, sandbox, "", signal)) === undefined) {
-      return;
+    const read = () => client.getService(workspace, sandbox, "", signal);
+    // An absent service is withdrawn only once GetWorkspace proves the identity still sees the
+    // Workspace and a second read still finds none (findings 1670, 1692); a service the second
+    // read finds is deleted. The next worker start's sweep reads the service again.
+    const exposed =
+      (await refused(read)) ??
+      (await confirmSandboxAbsent(
+        client,
+        workspace,
+        signal,
+        refused,
+        () =>
+          new OpenShellSandboxConfigurationFailure(
+            `OpenShell reports no Workspace ${workspace}, so ${unconfirmed}.`,
+          ),
+        read,
+      ));
+    if (exposed !== undefined) {
+      await refused(() => client.deleteService(workspace, sandbox, "", signal));
     }
-    await client.deleteService(workspace, sandbox, "", signal);
   }
 
   private async initializeWorkspace(
@@ -2823,9 +2915,13 @@ export class OpenShellSandboxDriver implements SandboxDriver {
     );
     // Supervisor readiness permits private exec; the Harness is still waiting for
     // the completion marker. A later reconciliation handles a still-starting Pod.
+    // NOT_FOUND here (also a Sandbox hidden from this identity, finding 1676) only defers the
+    // setup: this pass read or created the Sandbox a moment ago, so it is a flap within one
+    // pass, nothing is recorded as gone, and the next pass's create fails closed.
     if (current?.phase !== "SANDBOX_PHASE_READY" && current?.phase !== 2) {
       return;
     }
+    let exit: number;
     try {
       const secret = await kubernetes(context).read({
         apiVersion: "v1",
@@ -2855,7 +2951,7 @@ export class OpenShellSandboxDriver implements SandboxDriver {
       ) {
         throw new Error();
       }
-      const exit = await client.execSandbox(
+      exit = await client.execSandbox(
         {
           workspace,
           sandbox: sandbox.resourceName,
@@ -2871,12 +2967,17 @@ export class OpenShellSandboxDriver implements SandboxDriver {
         },
         context.signal,
       );
-      if (exit !== 0) {
-        throw new Error();
-      }
     } catch {
       context.signal.throwIfAborted();
       // Neither API/parser diagnostics nor remote output may disclose initial files.
+      throw new OpenShellSandboxConfigurationFailure("OpenShell workspace initialization failed.");
+    }
+    if (exit === WORKSPACE_SETUP_REFUSED_EXIT_STATUS) {
+      // Every retry would refuse the same way: fail the deployment now, as Kubernetes Compute
+      // does for its init container (finding 1708).
+      throw new SandboxWorkspaceSetupRefusedError("OpenShell workspace initialization refused.");
+    }
+    if (exit !== 0) {
       throw new OpenShellSandboxConfigurationFailure("OpenShell workspace initialization failed.");
     }
   }
@@ -3031,20 +3132,44 @@ export class OpenShellSandboxDriver implements SandboxDriver {
       }
       const client = this.gatewayClientForNamespace(sandbox.namespaceName);
       const workspace = workspaceName(context.namespace);
-      await client.deleteSandbox(
-        {
-          name: sandbox.resourceName,
+      const selector = { name: sandbox.resourceName, workspace };
+      // A stop, retire or delete records the Sandbox removed only once OpenShell confirms it.
+      // GetSandbox and DeleteSandbox answer NOT_FOUND alike for a Sandbox that is gone and for
+      // one this identity may not see (finding 1676), so an absent Sandbox counts as removed
+      // only after GetWorkspace proves the identity still sees the Workspace and a second read
+      // still finds none (finding 1692); a Sandbox the second read finds is deleted. A refusal
+      // on any call fails with SANDBOX_GATEWAY_UNAUTHORIZED, so the worker fails the stop or
+      // deletion with that code (a replay tries again) instead of recording a live Sandbox,
+      // with its exposure and credentials, as gone. The read also spares a DeleteSandbox per
+      // pass once the Sandbox is gone.
+      const unconfirmed = `Sandbox ${sandbox.resourceName} cannot be confirmed removed`;
+      const refused = gatewayIdentityRefusal(workspace, unconfirmed);
+      const read = () => client.getSandbox(selector, context.signal);
+      const present =
+        (await refused(read)) ??
+        (await confirmSandboxAbsent(
+          client,
           workspace,
-        },
-        context.signal,
-      );
+          context.signal,
+          refused,
+          () =>
+            new OpenShellSandboxConfigurationFailure(
+              `OpenShell reports no Workspace ${workspace}, so ${unconfirmed}.`,
+            ),
+          read,
+        ));
+      if (present !== undefined) {
+        await refused(() => client.deleteSandbox(selector, context.signal));
+      }
       const harnessId = context.revision.harness.id;
       if (
         context.revision.harness.mode === "dedicated" &&
         (harnessId === "codex" || harnessId === "openclaw")
       ) {
         const provider = runtimeProviderName(context.revision.id);
-        const existing = await client.getProvider(workspace, provider, context.signal);
+        const existing = await refused(() =>
+          client.getProvider(workspace, provider, context.signal),
+        );
         if (existing !== undefined) {
           verifyRuntimeProvider(
             existing,
@@ -3099,6 +3224,231 @@ export class OpenShellSandboxDriver implements SandboxDriver {
    * path cannot create, delete or exec into a Sandbox. The Sandbox name is derived from
    * the revision exactly as at provisioning.
    */
+  admitNetworkPolicy(
+    additions: readonly SandboxNetworkGrant[],
+    version: number,
+    defaults?: SandboxPolicySnapshot["defaults"],
+  ): SandboxPolicySnapshot {
+    openShellAgentNetworkRules(additions);
+    const rules = defaults ?? networkPolicies(this.options);
+    if (Object.keys(rules).some((name) => name.startsWith(AGENT_POLICY_PREFIX))) {
+      throw new Error("Default policy uses a reserved Agent policy name.");
+    }
+    return immutableCopy({
+      driverId: this.id,
+      implementation: this.implementation,
+      version,
+      defaults: rules as OpenClawConfigurationDocument,
+      additions,
+    });
+  }
+
+  private async policyTarget(context: SandboxLogContext) {
+    this.requireOperatorWorkspaceMode("read or apply an Agent network policy");
+    if (
+      context.revision.namespaceId !== context.namespace.id ||
+      context.revision.sandboxDriverId !== this.id
+    ) {
+      throw new Error("Invalid policy revision scope.");
+    }
+    const ref = this.sandboxRef(context);
+    const client = this.gatewayClientForNamespace(ref.namespaceName);
+    const request = { sandbox: ref.resourceName, workspace: workspaceName(context.namespace) };
+    const sandbox = await client.getSandbox(
+      { name: request.sandbox, workspace: request.workspace },
+      context.signal,
+    );
+    if (
+      sandbox === undefined ||
+      sandbox.name !== request.sandbox ||
+      sandbox.workspace !== request.workspace ||
+      sandbox.annotations["openclaw.dev/namespace-id"] !== context.namespace.id ||
+      sandbox.annotations["openclaw.dev/agent-id"] !== context.revision.agentId ||
+      sandbox.annotations["openclaw.dev/revision-id"] !== context.revision.id ||
+      sandbox.resourceVersion === undefined
+    ) {
+      throw new Error("The Sandbox is unavailable or has different ownership.");
+    }
+    return { client, request, sandbox };
+  }
+
+  async observeNetworkPolicy(
+    context: SandboxLogContext,
+    snapshot: SandboxPolicySnapshot,
+  ): Promise<SandboxPolicyObservation> {
+    if (snapshot.driverId !== this.id || snapshot.implementation !== this.implementation) {
+      throw new Error("Unsupported policy snapshot.");
+    }
+    const { client, request, sandbox } = await this.policyTarget(context);
+    if (client.getPolicyStatus === undefined) {
+      throw new Error("Policy status is unavailable.");
+    }
+    const baseline = asRecord(sandbox.spec?.policy);
+    if (baseline === undefined) {
+      throw new Error("Missing policy baseline.");
+    }
+    const candidate = openShellPolicyCandidate(baseline, snapshot);
+    const status = await client.getPolicyStatus(request, context.signal);
+    const matches = sameOpenShellPolicy(status.policy, candidate);
+    const state =
+      status.state === "POLICY_STATUS_LOADED" && status.activeVersion === status.version
+        ? "applied"
+        : status.state === "POLICY_STATUS_FAILED" || status.state === "POLICY_STATUS_SUPERSEDED"
+          ? "failed"
+          : "pending";
+    return {
+      resourceVersion: sandbox.resourceVersion!,
+      policyVersion: String(status.version),
+      state,
+      matches,
+    };
+  }
+
+  async applyNetworkPolicy(
+    context: SandboxLogContext,
+    input: {
+      readonly snapshot: SandboxPolicySnapshot;
+      readonly expectedProviderVersion: string;
+      readonly operationId: string;
+    },
+  ): Promise<void> {
+    const { client, request, sandbox } = await this.policyTarget(context);
+    if (
+      input.snapshot.driverId !== this.id ||
+      input.snapshot.implementation !== this.implementation ||
+      client.updatePolicy === undefined
+    ) {
+      throw new Error("Live policy application is unsupported.");
+    }
+    const baseline = asRecord(sandbox.spec?.policy);
+    if (baseline === undefined) {
+      throw new Error("Missing policy baseline.");
+    }
+    await client.updatePolicy(
+      {
+        ...request,
+        policy: openShellPolicyCandidate(baseline, input.snapshot),
+        expectedResourceVersion: input.expectedProviderVersion,
+        requestId: input.operationId,
+      },
+      context.signal,
+    );
+  }
+
+  async readPolicyRecommendations(
+    context: SandboxLogContext,
+    limit: number,
+  ): Promise<SandboxPolicyRecommendations> {
+    const { client, request } = await this.policyTarget(context);
+    if (
+      client.getPolicyDrafts === undefined ||
+      !Number.isInteger(limit) ||
+      limit < 1 ||
+      limit > 32
+    ) {
+      throw new Error("Policy recommendations are unavailable.");
+    }
+    const drafts = await client.getPolicyDrafts(request, context.signal);
+    const chunks = drafts.chunks;
+    const recommendations: SandboxPolicyRecommendation[] = [];
+    let omitted = false;
+    for (const chunk of chunks) {
+      const rule = asRecord(chunk.proposed_rule);
+      const binaries = rule?.binaries;
+      const endpoints = rule?.endpoints;
+      // Only lossless, binary-scoped L4 suggestions fit this contract. Never broaden a richer rule.
+      if (
+        !Array.isArray(binaries) ||
+        binaries.length !== 1 ||
+        !Array.isArray(endpoints) ||
+        endpoints.length !== 1 ||
+        typeof chunk.id !== "string" ||
+        !["pending", "approved", "rejected"].includes(String(chunk.status))
+      ) {
+        omitted = true;
+        continue;
+      }
+      const endpoint = asRecord(endpoints[0]);
+      const binary = asRecord(binaries[0])?.path;
+      const ports = endpoint?.ports ?? (endpoint?.port ? [endpoint.port] : []);
+      if (
+        typeof binary !== "string" ||
+        typeof endpoint?.host !== "string" ||
+        !Array.isArray(ports) ||
+        ports.length === 0 ||
+        ports.length > 16 ||
+        ![undefined, "", "tcp"].includes(endpoint.protocol as string | undefined) ||
+        (endpoint.path !== undefined && endpoint.path !== "")
+      ) {
+        omitted = true;
+        continue;
+      }
+      const representable = new Set([
+        "host",
+        "port",
+        "ports",
+        "protocol",
+        "tls",
+        "enforcement",
+        "advisor_proposed",
+      ]);
+      const hasRestrictions = Object.entries(endpoint).some(([key, value]) => {
+        if (representable.has(key) || key.startsWith("_")) {
+          return false;
+        }
+        if (Array.isArray(value)) {
+          return value.length > 0;
+        }
+        return (
+          value !== undefined &&
+          value !== null &&
+          value !== "" &&
+          value !== false &&
+          value !== 0 &&
+          (typeof value !== "object" || Object.keys(value).length > 0)
+        );
+      });
+      if (
+        hasRestrictions ||
+        ![undefined, "", "NETWORK_TLS_MODE_SKIP"].includes(endpoint.tls as string | undefined) ||
+        ![
+          undefined,
+          "",
+          "NETWORK_ENFORCEMENT_MODE_UNSPECIFIED",
+          "NETWORK_ENFORCEMENT_MODE_ENFORCE",
+        ].includes(endpoint.enforcement as string | undefined)
+      ) {
+        omitted = true;
+        continue;
+      }
+      const grant = {
+        id: `suggestion-${chunk.id}`,
+        binary,
+        host: endpoint.host,
+        ports: ports.map((port) => ({ from: Number(port), to: Number(port) })),
+      };
+      try {
+        openShellAgentNetworkRules([grant]);
+      } catch {
+        omitted = true;
+        continue;
+      }
+      if (recommendations.length === limit) {
+        omitted = true;
+        break;
+      }
+      recommendations.push({
+        id: chunk.id,
+        status: chunk.status as SandboxPolicyRecommendation["status"],
+        grant,
+        ...(Number.isSafeInteger(chunk.hit_count) && Number(chunk.hit_count) >= 0
+          ? { observations: Number(chunk.hit_count) }
+          : {}),
+      });
+    }
+    return { recommendations, truncated: omitted, providerVersion: drafts.version };
+  }
+
   async readSandboxLogs(
     context: SandboxLogContext,
     request: SandboxLogRequest,
@@ -3142,7 +3492,7 @@ export class OpenShellSandboxDriver implements SandboxDriver {
     return Object.freeze({
       sandbox: sandbox.resourceName,
       observedAt: new Date().toISOString(),
-      lines: response.lines,
+      lines: response.lines.map(openShellLogDecision),
       bufferTotal: response.bufferTotal,
     });
   }
@@ -3150,7 +3500,8 @@ export class OpenShellSandboxDriver implements SandboxDriver {
   /**
    * Reads the dedicated revision's own Sandbox record without touching it. Only the
    * gateway's lifecycle phase and restart state are used; the Harness transport is not
-   * contacted.
+   * contacted. A Sandbox hidden from this identity reads `lost` (`SANDBOX_MISSING`, finding
+   * 1676): an observation, not a removal, and no controller path acts on it today.
    */
   async observeHarness(context: SandboxLogContext): Promise<SandboxHarnessObservation> {
     this.requireOperatorWorkspaceMode("observe a Harness");
@@ -3185,7 +3536,9 @@ export class OpenShellSandboxDriver implements SandboxDriver {
   /**
    * The revision's supervisor Pod opens its workspace-node connection. OpenShell labels that
    * Pod with the Sandbox's gateway-minted ID (`sandbox_runtime.rs` `control_labels`), a UUID
-   * distinct from the Sandbox name, so the ID is read from the gateway's own record.
+   * distinct from the Sandbox name, so the ID is read from the gateway's own record. A Sandbox
+   * hidden from this identity (finding 1676) contributes no peer: the Gateway then admits its
+   * node connection from nowhere, which is restrictive, not a removal.
    */
   async workspaceNodePeerLabels(
     context: SandboxNamespaceContext & { readonly revision: Readonly<AgentRevision> },

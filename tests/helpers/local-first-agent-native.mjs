@@ -13,8 +13,10 @@ const provisioningPhases = ["admitted", "configuration", "transport", "handoff"]
 const deploymentProgressCodes = new Set([
   "REVISION_INCOMPLETE",
   "REVISION_UNSCHEDULABLE",
+  "REVISION_IMAGE_PULL_FAILED",
   "WORKSPACE_NODE_PENDING",
   "WORKSPACE_NODE_BINDING_PENDING",
+  "WORKSPACE_SETUP_RETRYING",
   "HARNESS_CREDENTIAL_BOOTSTRAP_PENDING",
   "LEASE_EXPIRED",
 ]);
@@ -27,6 +29,7 @@ const runtimeFailureCodes = new Set([
   "RUNTIME_MODEL_PROBE_FAILED",
   "RUNTIME_LOGIN_FAILED",
   "RUNTIME_STARTUP_FAILED",
+  "WORKSPACE_SETUP_REFUSED",
   "CONVERGENCE_DEADLINE_EXCEEDED",
   "PROVISIONING_DEPLOYMENT_FAILED",
 ]);
@@ -57,9 +60,44 @@ const providerCodes = new Set([
   "missing_api_key",
   "insufficient_permissions",
 ]);
+// Which response header names the upfront 401 carried (names only, no origin claim).
+// "none" is a real value here, so an absent field prints "absent" instead.
+const responseHeaderMarkers = new Set(["none", "provider-like", "openshell-policy", "mixed"]);
+// The upfront 401 body's form and its error.code and error.type, each from a closed
+// set ("other" off-set); the message never reaches the log. They mirror the sets in
+// runtime-entrypoints.ts; runtime-model-probe-settlement.test.mjs pins that.
+export const bodyShapes = new Set([
+  "json-error-code",
+  "json-error-no-code",
+  "json-no-error",
+  "non-json",
+  "empty",
+]);
+export const providerErrorCodes = new Set([
+  "invalid_api_key",
+  "insufficient_permissions",
+  "invalid_organization",
+  "mismatched_organization",
+  "no_organization",
+  "invalid_project",
+  "mismatched_project",
+  "account_deactivated",
+  "deactivated_workspace",
+  "ip_not_authorized",
+  "other",
+]);
+export const providerErrorTypes = new Set([
+  "invalid_request_error",
+  "authentication_error",
+  "permission_error",
+  "other",
+]);
 
 const absentOr = (value, observe) =>
   value === undefined || value === null ? "none" : observe(value);
+// For fields where "none" is a real value: absent prints "absent", off-set "other".
+const markerOrAbsent = (value, known) =>
+  value === undefined || value === null ? "absent" : known.has(value) ? value : "other";
 const failureCategory = (code) => (runtimeFailureCodes.has(code) ? code : "unrecognized");
 const progressCode = (code) => (deploymentProgressCodes.has(code) ? code : "unknown");
 
@@ -84,6 +122,10 @@ function observedModelProbe(logs, revisionId) {
     providerCode: absentOr(fields.providerCode, (code) =>
       providerCodes.has(code) ? code : "other",
     ),
+    responseHeaderMarker: markerOrAbsent(fields.responseHeaderMarker, responseHeaderMarkers),
+    bodyShape: markerOrAbsent(fields.bodyShape, bodyShapes),
+    providerErrorCode: markerOrAbsent(fields.providerErrorCode, providerErrorCodes),
+    providerErrorType: markerOrAbsent(fields.providerErrorType, providerErrorTypes),
   };
 }
 
@@ -212,6 +254,13 @@ export async function waitForNativeRedeploy({
   while (Date.now() < deadline) {
     signal.throwIfAborted();
     deployment = await request("GET", `${agentPath}/deployments/${revisionId}`);
+    // Bind the response before interpreting status or collecting failure diagnostics.
+    assert.ok(
+      deployment?.namespaceId === namespaceId &&
+        deployment.agentId === agentId &&
+        deployment.deploymentId === revisionId,
+      "The native redeploy returned a mismatched deployment binding",
+    );
     await assertNativeRedeployNotFailed(
       deployment,
       "Redeployment with the retained native workspace must succeed",

@@ -410,6 +410,26 @@ test("a failed model probe keeps its closed-vocabulary cause, never other cause 
         },
       ),
       probe("openclaw.model_probe", { kind: "WRAPPER_ERROR" }),
+      // The upfront 401 reports which header names it saw and its body's shape and
+      // closed-set error code and type; the Codex probe has none of these fields,
+      // and provider text never passes.
+      probe("openclaw.model_probe", undefined, {
+        providerStatus: 401,
+        providerCode: "missing_api_key",
+        responseHeaderMarker: "provider-like",
+        bodyShape: "json-error-code",
+        providerErrorCode: "no_organization",
+        providerErrorType: "invalid_request_error",
+        providerMessage: "Missing bearer or basic authentication in header",
+        error: { code: "no_organization", message: "sk-live-abc" },
+        body: '{"error":{"message":"sk-live-abc"}}',
+      }),
+      probe("codex.model_probe", undefined, {
+        responseHeaderMarker: "provider-like",
+        bodyShape: "json-error-code",
+        providerErrorCode: "no_organization",
+        providerErrorType: "invalid_request_error",
+      }),
       // Off-vocabulary details, unknown kinds and extra keys drop the cause, never the line.
       probe("openclaw.model_probe", { kind: "PROBE_STATUS", detail: "sk-live-abc" }),
       probe("openclaw.model_probe", { kind: "PROVIDER_TEXT" }),
@@ -444,6 +464,15 @@ test("a failed model probe keeps its closed-vocabulary cause, never other cause 
       causeDetail: "rate_limit",
     }),
     fields("openclaw.model_probe", { causeKind: "WRAPPER_ERROR" }),
+    fields("openclaw.model_probe", {
+      providerStatus: 401,
+      providerCode: "missing_api_key",
+      responseHeaderMarker: "provider-like",
+      bodyShape: "json-error-code",
+      providerErrorCode: "no_organization",
+      providerErrorType: "invalid_request_error",
+    }),
+    fields("codex.model_probe"),
     fields("openclaw.model_probe"),
     fields("openclaw.model_probe"),
     fields("codex.model_probe"),
@@ -462,6 +491,85 @@ test("a failed model probe keeps its closed-vocabulary cause, never other cause 
       fields: { phase: "model-probe", outcome: "failed", code: "MODEL_PROBE_FAILED" },
     },
   ]);
+});
+
+// Finding 2017: a failed Codex login or model check names the class of Codex's error
+// output. Only a value from the contract's closed list passes, and only on those events.
+test("a failed Codex login or model check keeps its closed-list failure class, never other text", () => {
+  const login = (failureClass) =>
+    JSON.stringify({
+      event: "runtime.startup_phase",
+      container: "agent",
+      phase: "codex-login",
+      outcome: "failed",
+      ms: 812,
+      sinceStartMs: 900,
+      failureClass,
+    });
+  const probe = (event, failureClass) =>
+    JSON.stringify({
+      event,
+      elapsedMs: 2340,
+      exitCode: 1,
+      code: "MODEL_PROBE_FAILED",
+      cause: { kind: "PROCESS_EXIT", detail: "exit-1" },
+      failureClass,
+    });
+  const { records, withheld } = sanitize(
+    agentPodStream,
+    [
+      login("network"),
+      probe("codex.model_probe", "http_5xx"),
+      // Off-list values, token-shaped text and non-strings are dropped, never the line.
+      login("sk-proj-0123456789abcdefghijklmnop"),
+      probe(
+        "codex.model_probe",
+        "error sending request for url (https://auth.example.invalid/?a=b)",
+      ),
+      probe("codex.model_probe", { class: "network" }),
+      probe("codex.model_probe", "NETWORK"),
+      // Other wrapper events never carry a class.
+      probe("openclaw.model_probe", "network"),
+    ],
+    { first: 1 },
+  );
+  assert.equal(withheld, 0);
+  const loginFields = (extra = {}) => ({
+    kind: "wrapper",
+    level: "error",
+    message: "runtime.startup_phase",
+    fields: {
+      container: "agent",
+      phase: "codex-login",
+      outcome: "failed",
+      ms: 812,
+      sinceStartMs: 900,
+      ...extra,
+    },
+  });
+  const probeFields = (event, extra = {}) => ({
+    kind: "wrapper",
+    level: "error",
+    message: event,
+    fields: {
+      elapsedMs: 2340,
+      code: "MODEL_PROBE_FAILED",
+      ...(event === "codex.model_probe" ? { exitCode: 1 } : {}),
+      causeKind: "PROCESS_EXIT",
+      causeDetail: "exit-1",
+      ...extra,
+    },
+  });
+  assert.deepEqual(pick(records, wrapperKeys), [
+    loginFields({ failureClass: "network" }),
+    probeFields("codex.model_probe", { failureClass: "http_5xx" }),
+    loginFields(),
+    probeFields("codex.model_probe"),
+    probeFields("codex.model_probe"),
+    probeFields("codex.model_probe"),
+    probeFields("openclaw.model_probe"),
+  ]);
+  assert.doesNotMatch(JSON.stringify(records), /sk-proj|error sending|example\.invalid|NETWORK/);
 });
 
 test("a Gateway settings override keeps its setting names, never values (D322)", () => {

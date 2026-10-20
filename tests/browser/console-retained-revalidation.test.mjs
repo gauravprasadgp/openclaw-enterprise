@@ -243,6 +243,32 @@ test("Refocusing a loaded page keeps it steady while access is rechecked", async
   await page.waitForURL("**/console/agents/new**");
 });
 
+for (const moveToSidebar of [false, true]) {
+  test(`Agent revalidation ${moveToSidebar ? "preserves newer sidebar focus" : "restores header action focus"}`, async (t) => {
+    const { page } = await openList(t, "Header focus", "Header Agent", {
+      deploy: true,
+      running: true,
+    });
+    await openAgent(page, "Header Agent");
+    const action = page.locator(".page-header").getByRole("button", { name: "Create new version" });
+    const sidebar = page.getByRole("link", NAMESPACES);
+    await action.focus();
+    assert.equal(await isFocused(action), true);
+
+    const session = await holdOnce(t, page);
+    await refocus(page);
+    await session.requested;
+    await page.locator(heldView).waitFor();
+    assert.equal(await action.evaluate((node) => node.closest("[inert]") !== null), true);
+    if (moveToSidebar) {
+      await sidebar.focus();
+    }
+    session.release();
+    await page.locator(settledView).waitFor();
+    assert.equal(await isFocused(moveToSidebar ? sidebar : action), true);
+  });
+}
+
 test("Back after switching Namespace keeps the shown page until the return is admitted", async (t) => {
   const { fixture, page } = await signedOutPage(t);
   const first = await fixture.createNamespace("First scope", { ready: true });
@@ -406,19 +432,20 @@ test("A page held for Agents keeps its own navigation and header until Agents re
   ]);
 
   // A return from Settings: the retained list revalidates while Settings is held.
-  await page.getByRole("button", { name: /OpenClaw Enterprise/ }).click();
+  await page.locator(".account-toggle").click();
   await page.getByRole("menuitem", { name: "Settings" }).click();
   await page.locator(settledView).locator("dl.settings").waitFor();
   await shownFrames(page);
   const returnRead = await holdOnce(t, page, list);
-  await page.getByRole("button", { name: "Back", exact: true }).click();
+  await page.getByRole("link", { name: "Agents", exact: true }).click();
   await returnRead.requested;
   returnRead.release();
   await listShown(page, "Shell Agent");
-  // The first entry is the state the recorder re-reads after the previous splice.
+  // The first entry is the state the recorder re-reads after the previous splice. Settings has
+  // no Namespace scope, so it shows no selector, held or not.
   assert.deepEqual(await shownFrames(page), [
-    "none | Settings | selector | Settings",
-    "none | Settings | selector | Settings (held)",
+    "none | Settings | no selector | Settings",
+    "none | Settings | no selector | Settings (held)",
     agentsShown,
   ]);
 });
@@ -538,7 +565,7 @@ for (const c of [
     prepare: (page) => openAgent(page, "Draft Agent"),
     enter: (page) =>
       page
-        .locator(".agent-overview-toolbar")
+        .locator(".content .page-header")
         .getByRole("button", { name: "Create new version" })
         .click(),
     revision: /revision=draft/,
@@ -699,7 +726,7 @@ test("Back between an Agent's tabs before its overview reveals loads the tab in 
     deploy: true,
   });
   await openAgent(page, "Tab Agent");
-  await page.getByRole("button", { name: "Plugins", exact: true }).click();
+  await page.getByRole("tab", { name: "Plugins", exact: true }).click();
   await page.waitForURL(/tab=plugins/);
   await showNamespaces(page);
   const record = await holdOverview(t, page, namespace, agent);
@@ -717,7 +744,7 @@ test("Back between an Agent's tabs before its overview reveals loads the tab in 
   record.release();
   await agentShown(page);
   assert.equal(
-    await page.locator('.content [aria-current="page"]', { hasText: "Configuration" }).count(),
+    await page.locator('.content [aria-selected="true"]', { hasText: "Configuration" }).count(),
     1,
   );
   assert.equal(await page.locator('.content [aria-live="polite"]').count(), 1);
@@ -1492,16 +1519,16 @@ test("Logout during a first visit's hold leaves nothing private, even after Back
   const agentRead = await holdAgent(t, page, namespace, agent);
   await page.getByRole("link", { name: "Held Agent" }).click();
   await agentRead.requested;
-  await page.getByRole("button", { name: /OpenClaw Enterprise/ }).click();
-  await page.getByRole("menuitem", { name: "Logout" }).click();
-  await page.getByRole("button", { name: "Login" }).waitFor();
+  await page.locator(".account-toggle").click();
+  await page.getByRole("menuitem", { name: "Sign out" }).click();
+  await page.getByRole("button", { name: "Sign in" }).waitFor();
   agentRead.release();
   await page.clock.runFor(400);
   assert.equal(await page.locator(".content, nav").count(), 0);
   // Back reloads the list's URL: the session is gone, so sign-in shows again.
   await page.goBack();
   await page.clock.runFor(400);
-  await page.getByRole("button", { name: "Login" }).waitFor();
+  await page.getByRole("button", { name: "Sign in" }).waitFor();
   assert.equal(await page.locator(".content, nav").count(), 0);
   assert.ok(!(await showedAgent(page)), "the held Agent page showed after logout");
 });
@@ -1518,7 +1545,7 @@ test("A Stop that lands after leaving the Agent closes its dialog, and Back rebu
     afterServer: true,
   });
   await page.getByRole("button", { name: "Stop Agent", exact: true }).first().click();
-  const dialog = page.getByRole("dialog", { name: "Stop Stopping Agent?" });
+  const dialog = page.getByRole("dialog", { name: "Stop this Agent?" });
   await dialog.getByRole("button", { name: "Stop Agent" }).click();
   await stop.requested;
   // The dialog is modal, so leave through the navigation link's own handler.
@@ -1532,10 +1559,8 @@ test("A Stop that lands after leaving the Agent closes its dialog, and Back rebu
   await page.goBack();
   await agentShown(page);
   assert.notEqual(await viewTag(page), "before-stop");
-  assert.equal(
-    await page.getByRole("button", { name: "Stop Agent", exact: true }).first().isDisabled(),
-    true,
-  );
+  await page.getByRole("button", { name: "Request Stop again", exact: true }).waitFor();
+  assert.equal(await page.getByRole("button", { name: "Stop Agent", exact: true }).count(), 0);
 });
 
 // The case above trusts holdRequests() to send a held write exactly once. A loopback origin
@@ -1815,7 +1840,7 @@ test("the console shell paints a neutral status before any script runs and keeps
     await page.waitForFunction(firstContentfulPaint, null, { timeout: 5_000 });
     await status.getByText("Loading OpenClaw Enterprise…", { exact: true }).waitFor();
     assert.equal(await page.locator("nav, .content, #namespace-selector").count(), 0, path);
-    assert.equal(await page.getByLabel("Username").count(), 0, path);
+    assert.equal(await page.getByLabel("Email", { exact: true }).count(), 0, path);
     const box = await status.boundingBox();
     await status.evaluate((node) => {
       node.dataset.staticShell = "kept";
@@ -1829,9 +1854,9 @@ test("the console shell paints a neutral status before any script runs and keeps
     assert.equal(await status.getAttribute("data-static-shell"), "kept", path);
     assert.deepEqual(await status.boundingBox(), box, path);
     assert.equal(await page.locator("nav, .content, #namespace-selector").count(), 0, path);
-    assert.equal(await page.getByLabel("Username").count(), 0, path);
+    assert.equal(await page.getByLabel("Email", { exact: true }).count(), 0, path);
     session.release();
-    await page.getByLabel("Username").waitFor();
+    await page.getByLabel("Email", { exact: true }).waitFor();
     await page.unrouteAll({ behavior: "ignoreErrors" });
   }
 });
@@ -1869,7 +1894,7 @@ test("the boot status stays hidden through a fast load and the scrollbar keeps i
     "stable",
   );
   script.release();
-  await page.getByLabel("Username").waitFor();
+  await page.getByLabel("Email", { exact: true }).waitFor();
 });
 
 // The web font is fetched alongside the stylesheet, so it is ready before the console's first
@@ -1901,6 +1926,6 @@ test("the console web font is ready before the entry script runs, fetched once",
     { timeout: 5_000 },
   );
   script.release();
-  await page.getByLabel("Username").waitFor();
+  await page.getByLabel("Email", { exact: true }).waitFor();
   assert.deepEqual(fonts, [`${fixture.origin}/console/fonts/instrument-sans-latin.woff2`]);
 });

@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { createConsoleAppFixture } from "../helpers/console-app.mjs";
 import {
   fileBrowser,
   holdRequests,
@@ -9,6 +8,7 @@ import {
   nativeValues,
   newPage,
 } from "./console-agents-browser-helpers.mjs";
+import { createReadyConsoleNamespace } from "./console-ready-namespace.mjs";
 
 // Every test opens its own context in one Chromium per file.
 const browser = fileBrowser();
@@ -22,9 +22,7 @@ const refocus = (page) => page.evaluate(() => globalThis.dispatchEvent(new Event
 // refocus recheck does not: the list stays inert while we check access, then the reader can
 // continue from the same link. Moving to the navigation during the check is a new focus choice.
 test("refocusing the Agents list restores its focused link unless the reader moved on", async (t) => {
-  const fixture = await createConsoleAppFixture(t);
-  await fixture.bootstrap();
-  const namespace = await fixture.createNamespace("Refocus focus", { ready: true });
+  const { fixture, namespace } = await createReadyConsoleNamespace(t, "Refocus focus");
   await fixture.createAgent(namespace.id, "Refocus Agent", nativeValues("v1"));
   const { page } = await newPage(t, fixture, { browser });
   await login(page, fixture, `/console/agents?namespace=${namespace.id}`);
@@ -89,9 +87,7 @@ const tagList = (page) =>
 const listKept = async (page) => (await page.locator(`${settledView}[data-kept]`).count()) === 1;
 
 async function openDeployedList(t, name) {
-  const fixture = await createConsoleAppFixture(t);
-  await fixture.bootstrap();
-  const namespace = await fixture.createNamespace(name, { ready: true });
+  const { fixture, namespace } = await createReadyConsoleNamespace(t, name);
   const agent = await fixture.createAgent(namespace.id, "Refocus Agent", nativeValues("v1"));
   await fixture.seedActiveAgentRevision(namespace.id, agent.id);
   const { page } = await newPage(t, fixture, { browser });
@@ -124,7 +120,7 @@ test("refocusing the Agents list while a row reads its deployment keeps the read
   row.release();
   const deployment = page.locator(settledView).locator(".agent-deployment a");
   await deployment.waitFor();
-  assert.match(await deployment.textContent(), /^v1 · succeeded/);
+  assert.match(await deployment.textContent(), /^v1 · Completed/);
   assert.equal(await isFocused(link), true);
   // The aborted read did not make the list one a later refocus rebuilds.
   await refocusHeld(t, page);
@@ -138,7 +134,7 @@ test("refocusing during a deployment reread keeps focus on that deployment", asy
   const { fixture, namespace, page } = await openDeployedList(t, "Refocus reread");
   await login(page, fixture, `/console/agents?namespace=${namespace.id}`);
   const cell = page.locator(settledView).locator(".agent-deployment");
-  const deployment = cell.getByRole("link", { name: "v1 · succeeded", exact: true });
+  const deployment = cell.getByRole("link", { name: "v1 · Completed", exact: true });
   await deployment.waitFor();
   await deployment.focus();
   await tagList(page);
@@ -178,7 +174,7 @@ test("refocusing the Agents list after a row read failed keeps the reader's plac
   await refocusHeld(t, page);
   assert.equal(await isFocused(link), true, "keep focus on the Agent link");
   assert.equal(await listKept(page), true, "reuse the list");
-  await cell.getByRole("link", { name: "v1 · succeeded", exact: true }).waitFor();
+  await cell.getByRole("link", { name: "v1 · Completed", exact: true }).waitFor();
 });
 
 // Shell controls outside the page are replaced by the recheck's shells; focus returns to the
@@ -211,4 +207,35 @@ test("refocusing the Agents list restores focus on sidebar and header controls",
   assert.equal(await isFocused(navigation), true);
   await refocusHeld(t, page);
   assert.equal(await isFocused(navigation), true, "focus returns to the navigation toggle");
+});
+
+// At phone width the recheck's new shell starts with its navigation drawer closed, so a control
+// that was focused in the open drawer is hidden. Focus goes to the drawer's toggle, as an account
+// menu item gives it to the account toggle, instead of falling to the body (finding 1680).
+test("refocusing at phone width with the navigation drawer open focuses the drawer toggle", async (t) => {
+  const { fixture, namespace, page } = await openDeployedList(t, "Refocus drawer");
+  await page.setViewportSize({ width: 390, height: 844 });
+  await login(page, fixture, `/console/agents?namespace=${namespace.id}`);
+  await page.locator(settledView).locator(".agent-deployment a").waitFor();
+  const navigation = page.getByRole("button", { name: "Open navigation" });
+  const drawer = page.locator("#navigation-drawer");
+  const toggle = drawer.locator(".account-toggle");
+  for (const [name, control, openMenu = false] of [
+    ["a navigation link", drawer.getByRole("link", { name: "Namespaces", exact: true })],
+    ["the account toggle", toggle],
+    ["an account menu item", drawer.getByRole("menuitem", { name: "Settings" }), true],
+    ["the drawer's close button", drawer.getByRole("button", { name: "Close navigation" })],
+  ]) {
+    await navigation.click();
+    await drawer.waitFor({ state: "visible" });
+    if (openMenu) {
+      await toggle.click();
+    }
+    await control.focus();
+    assert.equal(await isFocused(control), true, `focus ${name}`);
+    await refocusHeld(t, page);
+    assert.equal(await isFocused(navigation), true, `${name} gives focus to the drawer toggle`);
+    assert.equal(await navigation.getAttribute("aria-expanded"), "false");
+    assert.equal(await drawer.isVisible(), false, "the drawer is closed");
+  }
 });

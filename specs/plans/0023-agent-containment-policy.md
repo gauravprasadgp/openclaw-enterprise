@@ -1,18 +1,18 @@
 ---
-rfc: ../rfcs/0021-agent-containment-policy.md
+rfc: ../rfcs/0023-agent-containment-policy.md
 ---
 
 # Implementation plan: Agent containment policy
 
-- **ID:** RFC-0021
+- **ID:** RFC-0023
 - **Delivery status:** Planned; #919 foundation hardening merged, containment milestones unimplemented
 - **Owner:** OCC resource and IAM maintainers, with Sandbox and Kubernetes Compute maintainers
-- **Authority:** [RFC-0021](../rfcs/0021-agent-containment-policy.md) and the [platform design](../../docs/design.md)
+- **Authority:** [RFC-0023](../rfcs/0023-agent-containment-policy.md) and the [platform design](../../docs/design.md)
 - **Source baseline:** Initial plan: `main` at `8193ad3ca`, including merged #919. Implementation planning follow-up: `main` at `cb6783fae`; provider audit: `main` at `bb7d2a110` (2026-10-07); current source refresh: `main` at `04f854a44` (2026-10-17).
 
 ## Outcome and scope
 
-First prove enforcement of the existing Installation policy through the regular Agent deployment workflow. Align driver-native qualification with [#79](https://github.com/openclaw/openclaw-enterprise/issues/79); normalized policy and any separately approved Namespace resource remain deferred to [#111 (1.x)](https://github.com/openclaw/openclaw-enterprise/issues/111). Selecting a Sandbox Driver implies required containment; no extra enable switch is proposed. RFC-0021 owns the exact trust, drift, lifecycle and traffic-class requirements.
+First prove enforcement of the existing Installation policy through the regular Agent deployment workflow. Align driver-native qualification with [#79](https://github.com/openclaw/openclaw-enterprise/issues/79); normalized policy and any separately approved Namespace resource remain deferred to [#111 (1.x)](https://github.com/openclaw/openclaw-enterprise/issues/111). Selecting a Sandbox Driver implies required containment; no extra enable switch is proposed. RFC-0023 owns the exact trust, drift, lifecycle and traffic-class requirements.
 
 The first qualification target is dedicated native OpenClaw on Kubernetes with the paired OpenShell Backend and an OpenAI static CredentialSource. Dedicated Codex with CredentialSource auth now has an experimental provider-file and bearer-passthrough path; production transport and containment qualification remain separate. Other login/source types, repository credentials and embedded/SSH execution are outside this qualification target. No qualifying production path exists today.
 
@@ -118,7 +118,7 @@ Follow the testing guides. Missing infrastructure or credentials leave proof inc
 
 ## Open decisions
 
-Decision owners and binding invariants are listed in [RFC-0021](../rfcs/0021-agent-containment-policy.md#open-decisions). Resource/IAM maintainers own vocabulary/ceiling administration; Sandbox maintainers own supervisor qualification and governed mutation; Compute maintainers own generation/expiry/suspension; Harness and Credential Gateway maintainers own supported combinations. Acceptance of a document does not complete any delivery milestone.
+Decision owners and binding invariants are listed in [RFC-0023](../rfcs/0023-agent-containment-policy.md#open-decisions). Resource/IAM maintainers own vocabulary/ceiling administration; Sandbox maintainers own supervisor qualification and governed mutation; Compute maintainers own generation/expiry/suspension; Harness and Credential Gateway maintainers own supported combinations. Acceptance of a document does not complete any delivery milestone.
 
 | Decision                                                  | Owner and affected work                                                                           |
 | --------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
@@ -138,6 +138,8 @@ RFC review and implementation discovery can proceed together. The PR's owning-te
 [keep this for the user to add notes. do not change between edits]
 
 ## Changelog
+
+- 2026-10-21: Merge main, renumber the unmerged proposal and primary plan to RFC-0023, and preserve existing index records.
 
 - 2026-10-17: Merge main, renumber to RFC-0021, repair moved links, separate historical provider audit from v0.1.4, and align scope with #79 and deferred #111.
 

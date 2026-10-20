@@ -29,11 +29,11 @@ graph TD
   Claim --> Config["<b>Create Configuration</b><br/>Record completed identity"]
   Config --> Agent["<b>Create Agent</b><br/>Grant exact credential access"]
   Agent --> Transport["<b>Compute Driver</b><br/>Trusted-proxy credentials"]
-  Transport --> Deploy["<b>Ordinary deploy</b><br/>Record first revision"]
-  Deploy --> Observe["<b>Same provisioning handle</b><br/>Observe admitted revision"]
+  Transport --> Deploy["<b>Ordinary deploy</b><br/>Record first version"]
+  Deploy --> Observe["<b>Same provisioning handle</b><br/>Observe saved version"]
   Observe -->|Pending| Observe
-  Observe -->|Activated| UI["<b>Agent deployment view</b><br/>Open existing revision"]
-  Observe -->|Failed| Terminal["<b>Creation failed</b><br/>Keep Agent and revision"]
+  Observe -->|Activated| UI["<b>Agent deployment view</b><br/>Open existing version"]
+  Observe -->|Failed| Terminal["<b>Creation failed</b><br/>Keep Agent and version"]
   Claim -->|Failure| Failed["<b>Retain outputs</b><br/>Retry known failures"]
   Failed -->|Uncertain write| Recovery["<b>Recovery required</b><br/>Do not repeat blindly"]
 
@@ -111,14 +111,14 @@ freeing the serial worker.
 
 `packages/occ/src/index.ts:OpenClawController.deployAgent`
 
-The job records its first revision ID. `packages/occ/src/index.ts:observeProvisioningDeployment`
-defers work without consuming retries until that revision activates or fails. The same handle reports
-success or the deployment’s safe error. Stop during rollout yields `REVISION_STOPPED`; Stop or deletion
+The job records its first Agent revision ID. `packages/occ/src/index.ts:observeProvisioningDeployment`
+defers work without consuming retries until that version activates or fails. The same handle reports
+success or the deployment’s safe error; meanwhile `progress` names its wait. Stop during rollout yields `REVISION_STOPPED`; Stop or deletion
 before handoff yields `PROVISIONING_CANCELLED` and says which happened. Status retains the Agent ID; both IDs survive restart.
 
-Create Agent (`apps/controller/src/console/agents/create.mjs:waitForProvisioning`) waits one second
-between status reads, using that interval for details such as a full Namespace Pod quota. At the
-next poll it cancels any unfinished detail read. Leaving the page stops polling, not provisioning.
+Create Agent (`apps/controller/src/console/agents/create.mjs:waitForProvisioning`) shows the job's named
+wait and waits one second between status reads, spending it on details such as a full Pod quota, cancelling unfinished reads
+at the next poll. Leaving the page stops polling, not provisioning.
 If the first deployment fails, open the existing Agent, correct the cause and deploy a new version.
 After an intentional Stop, deploy when ready. Reconciliation owns startup and activation;
 subsequent deployments use Deploy.
