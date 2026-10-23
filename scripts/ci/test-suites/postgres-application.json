@@ -59,7 +59,8 @@
         "api_key revision dispatch rechecks Configuration and exact harness Secret grants without backend Secret reads",
         "codex_pat revision dispatch rechecks Configuration and exact harness Secret grants without backend Secret reads",
         "revision dispatch refuses a different selected Secret Driver before binding or activating the Agent",
-        "revision dispatch never substitutes a later ChatGPT credential or reconfigured Backend for its admitted snapshot"
+        "revision dispatch never substitutes a later ChatGPT credential or reconfigured Backend for its admitted snapshot",
+        "a Kubernetes 403 on a private Secret write fails deployment on the first attempt"
       ]
     },
     {
@@ -77,7 +78,11 @@
         "a withdrawal reaches the predecessor that runs until its successor's deployment activates",
         "a withdrawn Harness source fails a deployment admitted before the withdrawal",
         "a withdrawal whose requester lost Agent operate fails once with a denial, and another operator's replay completes it",
-        "maintenance keeps re-queuing withdrawals after a withdrawn source loses its Agent grant"
+        "maintenance keeps re-queuing withdrawals after a withdrawn source loses its Agent grant",
+        "attached Git expires under ordinary maintenance; a moving Sandbox version and lost detach reply preserve the Agent",
+        "attached Git expires; a retained model profile that now covers GitHub retires the revision",
+        "attached Git expires; an overlapping platform profile behind a benign workspace namesake retires the revision",
+        "attached Git expires; a safe platform profile preserves the Agent until ordinary maintenance loses permission to read it"
       ]
     },
     {

@@ -215,7 +215,9 @@ CPU at its limit with `RUNTIME_CPU_STARVED`. Other failures that need a new
 version fail it early too: `RUNTIME_MODEL_PROBE_TIMEOUT`,
 `RUNTIME_MODEL_PROBE_FAILED`, `RUNTIME_LOGIN_FAILED`, `RUNTIME_STARTUP_FAILED`,
 and a workspace setup refusal (`WORKSPACE_SETUP_REFUSED`). A dedicated gateway that refuses its own in-Pod CLI as
-unauthorized fails activation at once with `AGENT_GATEWAY_UNAUTHORIZED`. A Sandbox Driver that cannot run
+unauthorized fails activation at once with `AGENT_GATEWAY_UNAUTHORIZED`, and a `403` on a
+private Secret write fails preparation at once with
+[`KUBERNETES_SECRET_WRITE_FORBIDDEN`](../../guides/operate/troubleshooting.md#a-deployment-fails-because-kubernetes-refused-a-secret). A Sandbox Driver that cannot run
 the version fails it on the first attempt with its
 [closed code](../drivers/sandbox.md), such as
 `SANDBOX_SECRET_ENVIRONMENT_UNSUPPORTED`, and two credential sources that share
@@ -224,7 +226,9 @@ a placeholder variable fail it the same way with
 the Harness credential source was withdrawn from the version
 (`CREDENTIAL_WITHDRAWN`), when the Harness authentication Secret or source, or a
 listed credential source, is missing or changed since admission
-(`HARNESS_AUTH_SOURCE_UNAVAILABLE`, `CREDENTIAL_SOURCE_UNAVAILABLE`), or when the
+(`HARNESS_AUTH_SOURCE_UNAVAILABLE`, `CREDENTIAL_SOURCE_UNAVAILABLE`), when the
+protected egress provider the Harness source was admitted with is no longer
+available (`EGRESS_PROVIDER_UNAVAILABLE`), or when the
 Installation no longer selects the version's Credential Gateway
 (`CREDENTIAL_GATEWAY_MISMATCH`) or Secret Driver (`SECRET_DRIVER_MISMATCH`). A
 version pinned to a Compute Driver the controller no longer selects, or to a

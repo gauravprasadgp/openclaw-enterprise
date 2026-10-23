@@ -1,3 +1,4 @@
+import { assertExecutionReleaseAllowed } from "@openclaw-enterprise/contracts";
 import { randomBytes } from "node:crypto";
 import { request as httpRequest } from "node:http";
 import type {
@@ -430,6 +431,15 @@ export class DockerComputeDriver implements ComputeDriver {
   private lifecycleStarted = false;
   private podmanApi = false;
 
+  /**
+   * Every topology runs one gateway container per Agent, so a candidate replaces the active
+   * revision's gateway. Exclusive replacement makes the worker stop predecessors first and stop
+   * a refused candidate, instead of leaving it serving under the predecessor (finding 1800).
+   */
+  requiresStoppedPredecessors(): boolean {
+    return true;
+  }
+
   constructor(options: DockerComputeDriverOptions) {
     required(options.images.gateway, "Docker gateway image");
     required(options.images.agent, "Docker Codex Agent image");
@@ -543,10 +553,17 @@ export class DockerComputeDriver implements ComputeDriver {
     );
   }
 
+  validateExecutionAdmission(
+    revision: Pick<AgentRevision, "executionAdmission" | "egressPlan">,
+  ): void {
+    assertExecutionReleaseAllowed(revision);
+  }
+
   async prepareRevision(
     revision: AgentRevision,
     context?: ComputeRevisionContext,
   ): Promise<ComputeReadiness> {
+    assertExecutionReleaseAllowed(revision);
     if (revision.harnessAuth !== undefined) {
       this.validateHarnessAuth();
     }
